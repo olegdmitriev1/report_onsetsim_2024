@@ -1,0 +1,377 @@
+---
+output:
+  pdf_document:
+    fig_caption: no
+    number_sections: no
+    toc: yes
+    toc_depth: 2
+    # github_document:
+    # html_preview: yes
+    # toc: yes
+    # toc_depth: 2
+editor_options: 
+  chunk_output_type: inline
+---
+
+# Dependencies
+```{r setup, message=FALSE}
+library(ggplot2)
+library(tibble)
+library(cowplot)
+library(beepr)
+library(Rfast)
+library(changepoint)
+library(mcp)
+library(rjags)
+library(mutoss)
+library(ecp)
+library(dplyr)
+source("./code/functions.R")
+source("./code/theme_gar.txt")
+# Edit `one_over_f` function from `primer` package to control variance (Stevens, 2009). 
+# Original function is available on [GitHub](https://github.com/HankStevens/primer).
+# Copyright Hank Stevens.
+source("./code/one_over_f.R")
+# Load template: true onset = 160 ms, F=81, max at F=126
+source("./code/erp_template.R")
+# R version of Matlab code from Yeung et al. 2004
+source("./code/eeg_noise.R")
+# Lodaing the code that gives median instead of mean values in mcp summary table
+source("./code/mcp_median_function.R")
+# to use with eeg_noise function
+meanpower <- unlist(read.table("./code/meanpower.txt"))
+```
+
+
+```{r}
+set.seed(777)
+np <- 19  # Number of participants
+srate <- 500  # Sampling rate in Hz
+Nt <- 50  # Number of trials
+outvar <- 1  # Noise variance
+Nf <- length(Xf)  # Number of frames based on Xf
+
+# Prepare a range of onsets
+ronset <- seq(150, 160, 2)  # Random onset time between 150 ms and 160 ms
+
+# Initialize a list to store all participant data
+participants <- list()
+
+# Generate data for each participant
+for (P in 1:np) {
+  # Sample a random onset for this participant
+  ponset <- sample(ronset, 1)  # Get random onset
+  st <- which(Xf == ponset)  # Find the corresponding index in Xf
+
+  # Create temp2 with the ERP starting at the random onset
+  temp2 <- c(rep(0, st-1), erp, rep(0, Nf - st - length(erp) + 1))
+
+  # Initialize matrices for conditions
+  cond1 <- matrix(0, nrow = Nt, ncol = Nf)
+  cond2 <- matrix(0, nrow = Nt, ncol = Nf)
+
+  # Generate EEG data for each trial
+  for (T in 1:Nt) {
+    cond2[T,] <- temp2 + eeg_noise(frames = Nf, srate = srate, outvar = outvar, meanpower)
+    cond1[T,] <- temp1 + eeg_noise(frames = Nf, srate = srate, outvar = outvar, meanpower)
+  }
+
+  # Calculate t-squared statistics for each frame
+  ori.t2 <- vector(mode = "numeric", length = Nf)
+  for (F in 1:Nf) {
+    ori.t2[F] <- t.test(cond1[,F], cond2[,F])$statistic^2
+  }
+
+  # Store results in a tibble for each participant
+  p_data <- tibble(x = Xf, y = ori.t2, participant = rep(P, length(ori.t2)))
+  
+  # Append the participant's data to the list
+  participants[[P]] <- p_data
+}
+
+# Combine all participant data into one data frame
+all.data <- bind_rows(participants)
+
+############################################
+# Outlier participant:
+new.onset <- 190
+
+# Adjust the ERP onset position
+# Calculate the index for the 180ms onset in the temp2 vector
+onset.index <- new.onset / (1000 / srate)  # Convert ms to index
+
+# Create temp1 and temp2 vectors
+Nf <- length(Xf)  # Number of frames
+temp1 <- vector(mode = "numeric", length = Nf)  # Baseline or control condition with no ERP
+erp <- dnorm(seq(-1.5, 1.5, length.out = 93), 0, 1)
+erp <- erp - min(erp)
+erp <- erp / max(erp)
+temp2 <- c(rep(0, onset.index), erp, rep(0, Nf - onset.index - length(erp)))  # Adjust temp2 with the new onset
+
+# Initialize the matrix for the participant's condition
+cond1 <- matrix(0, nrow = Nt, ncol = Nf)
+cond2 <- matrix(0, nrow = Nt, ncol = Nf)
+
+# Generate EEG data with noise for each trial
+for (T in 1:Nt) {
+  cond1[T,] <- temp1 + eeg_noise(frames = Nf, srate = srate, outvar = outvar, meanpower)
+  cond2[T,] <- temp2 + eeg_noise(frames = Nf, srate = srate, outvar = outvar, meanpower)
+}
+
+
+ori.t2 <- vector(mode = "numeric", length = Nf)
+
+for(F in 1:Nf){
+  ori.t2[F] <- t.test(cond1[,F], cond2[,F])$statistic^2
+}
+
+p20 <- tibble(x = Xf,
+             y = ori.t2)
+
+p20$participant <- 20 #assigning participant number so it can be merged into main df
+participants[[20]] <- p20
+all.data <- bind_rows(participants)
+
+# p.mcp <- ggplot(p20, aes(x, y)) + theme_gar + 
+#   geom_line(linewidth = 1) +
+#   geom_vline(xintercept = new.onset) +
+#   labs(x = "Time in ms", y = bquote(t^2)) 
+#   # ggtitle(paste("Change point onset =", round(summary_fit[1,2], 0), "ms"))
+# p.mcp
+```
+
+
+## Applying mcp
+```{r fig.height=20, fig.width=10}
+options(mc.cores = 3)
+
+model <- list(
+  y ~ 1,  # Baseline phase with constant mean
+    1 + (1 | participant) ~ 0 + x
+)
+
+fit <- mcp(model = model, data = all.data, cores = 3, chains = 3)
+summary(fit)
+plot(fit, facet_by = "participant")
+
+mcp::ranef(fit) 
+
+pp_check(fit, facet_by = "participant")
+
+plot_pars(fit,regex_pars = "^cp_1_participant", type = "dens_overlay", ncol = 2)
+
+plot_pars(fit, pars = "varying", type = "trace", ncol = 3)
+```
+
+
+```{r}
+mcp.fit.median::plot(fit, facet_by = "participant")
+mcp.fit.median
+mcp::ranef(fit) 
+
+pp_check(fit, facet_by = "participant")
+
+plot_pars(fit,regex_pars = "^cp_1_participant", type = "dens_overlay", ncol = 2)
+
+plot_pars(fit, pars = "varying", type = "trace", ncol = 3)
+```
+
+## Looking for first change point
+```{r fig.height=20, fig.width=10}
+options(mc.cores = 3)
+
+model <- list(
+  y ~ 1,  
+   1 + (1 | participant) ~ 0 + x,
+   1 + (1 | participant) ~ 0 + x
+)
+
+fit <- mcp(model = model, data = all.data, cores = 3, chains = 3)
+
+plot(fit, facet_by = "participant")
+
+mcp::ranef(fit) 
+
+pp_check(fit, facet_by = "participant")
+
+plot_pars(fit,regex_pars = "^cp_1_participant", type = "dens_overlay", ncol = 2)
+
+plot_pars(fit, pars = "varying", type = "trace", ncol = 3)
+
+save(fit, file = "./data/hierarchical_model_fit")
+```
+
+
+```{r fig.height=20, fig.width=10}
+options(mc.cores = 3)
+
+model <- list(
+  y ~ 1, 
+  1 + (1 | participant) ~ 0 + x
+)
+
+fit <- mcp(model = model, data = all.data, cores = 3, chains = 3)
+
+plot(fit, facet_by = "participant")
+
+mcp::ranef(fit) 
+
+pp_check(fit, facet_by = "participant")
+
+plot_pars(fit,regex_pars = "^cp_1_participant", type = "dens_overlay", ncol = 2)
+
+plot_pars(fit, pars = "varying", type = "trace", ncol = 3)
+```
+
+```{r fig.height=20, fig.width=10}
+options(mc.cores = 3)
+
+model <- list(
+  y ~ 1,  
+   1 + (1 | participant) ~ 0 + x,
+   1 + (1 | participant) ~ 0
+)
+
+fit <- mcp(model = model, data = all.data, cores = 3, chains = 3)
+
+plot(fit, facet_by = "participant")
+
+mcp::ranef(fit) 
+
+pp_check(fit, facet_by = "participant")
+
+plot_pars(fit,regex_pars = "^cp_1_participant", type = "dens_overlay", ncol = 2)
+
+plot_pars(fit, pars = "varying", type = "trace", ncol = 3)
+
+# save(fit, file = "./data/hierarchical_model_fit")
+```
+
+
+
+```{r fig.height=20, fig.width=10}
+options(mc.cores = 3)
+
+model <- list(
+  y ~ 1,  # Baseline phase with constant mean
+  ~ 1 + x + (1 | participant)  # First change point, varies by participant
+)
+
+fit <- mcp(model = model, data = all.data, cores = 3, chains = 3)
+
+plot(fit, facet_by = "participant")
+
+mcp::ranef(fit) 
+
+pp_check(fit, facet_by = "participant")
+
+plot_pars(fit,regex_pars = "^cp_1_participant", type = "dens_overlay", ncol = 2)
+
+plot_pars(fit, pars = "varying", type = "trace", ncol = 3)
+
+# save(fit, file = "./data/hierarchical_model_fit")
+```
+
+
+
+
+
+### below is the code using priors, doesnt work
+```{r fig.height=20, fig.width=10}
+options(mc.cores = 3)
+model <- list(
+  y ~ 1,  
+  1 + (1 | participant) ~ 0 + x 
+)
+
+prior <- list(
+  cp_1 = "dunif(100, 200)"  
+)
+
+fit <- mcp(model = model, prior = prior, data = all.data, cores = 3, chains = 3)
+
+plot(fit, facet_by = "participant")
+
+mcp::ranef(fit) 
+
+pp_check(fit, facet_by = "participant")
+
+plot_pars(fit,regex_pars = "^cp_1_participant", type = "dens_overlay", ncol = 2)
+
+plot_pars(fit, pars = "varying", type = "trace", ncol = 3)
+```
+
+## Comparing the above with a group without an outlier participant 
+```{r}
+set.seed(777)
+np <- 20  # Number of participants
+srate <- 500  # Sampling rate in Hz
+Nt <- 50  # Number of trials
+outvar <- 1  # Noise variance
+Nf <- length(Xf)  # Number of frames based on Xf
+
+# Prepare a range of onsets
+ronset <- seq(150, 160, 2)  # Random onset time between 150 ms and 160 ms
+
+# Initialize a list to store all participant data
+participants <- list()
+
+# Generate data for each participant
+for (P in 1:np) {
+  # Sample a random onset for this participant
+  ponset <- sample(ronset, 1)  # Get random onset
+  st <- which(Xf == ponset)  # Find the corresponding index in Xf
+
+  # Create temp2 with the ERP starting at the random onset
+  temp2 <- c(rep(0, st-1), erp, rep(0, Nf - st - length(erp) + 1))
+
+  # Initialize matrices for conditions
+  cond1 <- matrix(0, nrow = Nt, ncol = Nf)
+  cond2 <- matrix(0, nrow = Nt, ncol = Nf)
+
+  # Generate EEG data for each trial
+  for (T in 1:Nt) {
+    cond2[T,] <- temp2 + eeg_noise(frames = Nf, srate = srate, outvar = outvar, meanpower)
+    cond1[T,] <- temp1 + eeg_noise(frames = Nf, srate = srate, outvar = outvar, meanpower)
+  }
+
+  # Calculate t-squared statistics for each frame
+  ori.t2 <- vector(mode = "numeric", length = Nf)
+  for (F in 1:Nf) {
+    ori.t2[F] <- t.test(cond1[,F], cond2[,F])$statistic^2
+  }
+
+  # Store results in a tibble for each participant
+  p_data <- tibble(x = Xf, y = ori.t2, participant = rep(P, length(ori.t2)))
+  
+  # Append the participant's data to the list
+  participants[[P]] <- p_data
+}
+
+# Combine all participant data into one data frame
+all.data2 <- bind_rows(participants)
+```
+
+```{r fig.height=20, fig.width=10}
+options(mc.cores = 3)
+model <- list(
+  y ~ 1,  
+  1 + (1 | participant) ~ 0 + x 
+)
+
+prior <- list(
+  cp_1 = "dunif(100, 200)"  
+)
+
+fit2 <- mcp(model = model, prior = prior, data = all.data2, cores = 3, chains = 3)
+
+plot(fit2, facet_by = "participant")
+
+mcp::ranef(fit2) 
+
+pp_check(fit2, facet_by = "participant")
+
+plot_pars(fit2,regex_pars = "^cp_1_participant", type = "dens_overlay", ncol = 2)
+
+plot_pars(fit2, pars = "varying", type = "trace", ncol = 3)
+```
