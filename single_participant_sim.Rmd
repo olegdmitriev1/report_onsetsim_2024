@@ -1,0 +1,531 @@
+---
+output:
+  pdf_document:
+    fig_caption: no
+    number_sections: no
+    toc: yes
+    toc_depth: 2
+    # github_document:
+    # html_preview: yes
+    # toc: yes
+    # toc_depth: 2
+editor_options: 
+  chunk_output_type: inline
+---
+
+# Dependencies
+```{r setup, message=FALSE}
+library(ggplot2)
+library(tibble)
+library(cowplot)
+library(beepr)
+library(Rfast)
+library(changepoint)
+library(mcp)
+library(rjags)
+library(mutoss)
+library(ecp)
+source("./code/functions.R")
+source("./code/theme_gar.txt")
+# Edit `one_over_f` function from `primer` package to control variance (Stevens, 2009). 
+# Original function is available on [GitHub](https://github.com/HankStevens/primer).
+# Copyright Hank Stevens.
+source("./code/one_over_f.R")
+# Load template: true onset = 160 ms, F=81, max at F=126
+source("./code/erp_template.R")
+# R version of Matlab code from Yeung et al. 2004
+source("./code/eeg_noise.R")
+# Lodaing the code that gives median instead of mean values in mcp summary table
+source("./code/mcp_median_function.R")
+# to use with eeg_noise function
+meanpower <- unlist(read.table("./code/meanpower.txt"))
+```
+
+
+## Illustrate Signal + Noise
+```{r}
+set.seed(666)
+srate <- 500 # Sampling rate in Hz
+Nt <- 50 # number of trials
+outvar <- 1 # noise variance
+cond1 <- matrix(0, nrow = Nt, ncol = Nf) 
+cond2 <- matrix(0, nrow = Nt, ncol = Nf)
+
+for(T in 1:Nt){
+  cond2[T,] <- temp2 + eeg_noise(frames = Nf, srate = srate, outvar = outvar, meanpower)
+  cond1[T,] <- temp1 + eeg_noise(frames = Nf, srate = srate, outvar = outvar, meanpower)
+}
+df <- tibble(x = rep(Xf, each = Nt),
+             y = as.vector(cond2),
+             trials = factor(rep(1:Nt, Nf))
+             )
+
+df2 <- tibble(x = Xf,
+              y = apply(cond2, 2, mean),
+              trials = factor(rep(200, Nf))
+              )
+
+p <- ggplot(df, aes(x, y, group = trials)) + theme_gar +
+  geom_line(colour = "grey") +
+  geom_hline(yintercept = 0) +
+  geom_vline(xintercept = true_onset) +
+  geom_line(data = df2, aes(x, y), linewidth = 2, colour = "black") + 
+  labs(x = "Time in ms", y = "Signal in arbitrary units")
+p
+p.signoise <- p
+ggsave(filename = "./figures/eeg_noise_trials_mean.pdf", width = 10, height = 5) 
+```
+
+mcp 'summary' function was changed to provide median change point estimates as it provides mean by default. This was done by changing the tidybayes::mean_hdci to tidybayes::median_hdci. New function is called summary.mcpfit.median. 
+
+## Setting up mcp package 
+```{r eval=FALSE}
+options(mc.cores = 3) # speed up sampling
+set.seed(666)
+srate <- 500 # Sampling rate in Hz
+Nt <- 50 # number of trials
+outvar <- 1 # noise variance
+cond1 <- matrix(0, nrow = Nt, ncol = Nf) 
+cond2 <- matrix(0, nrow = Nt, ncol = Nf)
+
+for(T in 1:Nt){
+  cond2[T,] <- temp2 + eeg_noise(frames = Nf, srate = srate, outvar = outvar, meanpower)
+  cond1[T,] <- temp1 + eeg_noise(frames = Nf, srate = srate, outvar = outvar, meanpower)
+}
+
+ori.t2 <- vector(mode = "numeric", length = Nf)
+
+for(F in 1:Nf){
+  ori.t2[F] <- t.test(cond1[,F], cond2[,F])$statistic^2
+}
+
+df <- tibble(x = Xf,
+             y = ori.t2)
+
+# results <- list()
+
+# for (i in 1:2){
+# Model:
+model <- list(
+       y ~ 1 + sigma(1),         # Before change point: constant mean level
+         ~ 0 + x + sigma(1)      # After change point: different mean level (no intercept)
+)
+
+prior <- list(
+  cp_1 = "dunif(100, 200)" # change point expected between 100 and 200 ms
+)
+
+fit <- mcp(model, data = df, prior = prior, chains = 3, cores = 3)
+
+# results[[i]] <- fit
+
+# }
+
+plot(fit)
+summary_fit <- summary.mcpfit.median(fit) # summary object storing median change point estimate instead of mean using custom function
+
+# Plotting
+p.mcp <- ggplot(df, aes(x, y)) + theme_gar + 
+  geom_line(linewidth = 1) +
+  geom_vline(xintercept = true_onset) +
+  geom_vline(xintercept = summary_fit[1,2], linetype = "dotted") +
+  labs(x = "Time in ms", y = bquote(t^2)) +
+  ggtitle(paste("Change point onset =", round(summary_fit[1,2], 0), "ms"))
+p.mcp
+mcp:::summary.mcpfit(fit)
+pp_check(fit)
+```
+
+### Posterior Distribution plots 
+Below is a collection of plots showing the posterior distributions of the model. cp_1 density plot shows the posterior distribution of the change point. The peak of the curve shows the most likely location of the change point and the spread of the curve indicates the uncertainty around the estimate. The trace plot shows a lot of spikes indicating lack of consistency and convergence. 
+
+int_1 density plot shows the posterior distribution of the intercept (predicted value of the dependent variable when all predictors in the model are set to 0). It shows the distribution of the data before the change point (segment 1). 
+
+x_2 is the distribution of the slope parameter for segment 2 that takes place after the change point. 
+
+sigma_1 and sigma_2 plots represent the estimated range and distribution of the standard deviation of the model's errors and residuals in the first and second segments. The higher values of the second segment mean that the second segment is a lot more volatile or less predictable than the first segment.
+
+The units for the axis labels are in ms for the distribution plots, with the segment plots (int_1 and x_2) and the residual plots (sigma_1 and sigma_2) x-axis showing the standard deviation in ms. 
+
+Rhat values, a measure used to assess the convergence of MCMC simulations, are shown to be less than 1.1 meaning that the variance between chains is similar to the variance within chains suggesting that the chains are converged. This provides confidence that the MCMC chains are exploring the full posterior distribution. As well as showing that there are no obvious issues with this model.
+```{r, fig.height=8, fig.width=8}
+plot_pars(fit) # This command is broken in the CRAN version of mcp but works if you install mcp development version from github
+```
+
+
+
+## Simulations 
+```{r eval=FALSE, warning=FALSE, include=FALSE}
+
+
+ptm <- proc.time() # Timing code chunk execution
+options(mc.cores = 3)
+set.seed(666)
+aath <- 0.05 # arbitrary alpha threshold
+nsim <- 10000 # simulation iterations
+nboot <- 2000 # number of permutation samples
+simres.cp  <- vector(mode = "numeric", length = nsim) * NA
+simres.cs  <- vector(mode = "numeric", length = nsim) * NA
+simres.fdr <- vector(mode = "numeric", length = nsim) * NA
+simres.mcp <- vector(mode = "numeric", length = nsim) * NA
+simres.mcp.mean  <- vector(mode = "numeric", length = nsim) * NA # storing mean change points from mcp as well as median
+simres.pelt <- vector(mode = "numeric", length = nsim) * NA
+simres.ecp <- vector(mode = "numeric", length = nsim) * NA
+
+Nt <- 50 # number of trials
+gsp <- 1 # gamma spectral power
+outvar <- 1 # noise variance
+cond1 <- matrix(0, nrow = Nt, ncol = Nf)
+cond2 <- matrix(0, nrow = Nt, ncol = Nf)
+
+for(S in 1:nsim){
+  
+  for(T in 1:Nt){
+    cond2[T,] <- temp2 + one_over_f(gamma = gsp, Nf, outvar = outvar)
+    cond1[T,] <- temp1 + one_over_f(gamma = gsp, Nf, outvar = outvar)  
+  }
+  # t-tests
+  ori.t2 <- vector(mode = "numeric", length = Nf)
+  for(F in 1:Nf){
+    ori.t2[F] <- t.test(cond1[,F], cond2[,F])$statistic^2
+  }
+  
+  # fit change point model
+  res.cp <- cpt.meanvar(ori.t2, method = "BinSeg", Q=2)
+  simres.cp[S] <- Xf[res.cp@cpts[1]]
+  
+  # fit mcp model
+  df <- tibble(x = Xf, y = ori.t2)
+  model <- list(
+    y ~ 1 + sigma(1),
+      ~ 0 + x + sigma(1)
+  )
+
+  prior <- list(
+    cp_1 = "dunif(100, 250)" # Change point expected between 100 and 250 ms
+  )
+
+  fit <- mcp(model, prior = prior, data = df, cores = 3, chains = 3)
+
+  summary.fit.median <- summary.mcpfit.median(fit)
+  simres.mcp[S] <- round(summary.fit.median[1,2],0)
+ 
+  # Fitting the same model but for the mean function to compare to median
+  summary.fit.mean <- mcp:::summary.mcpfit(fit)
+  simres.mcp.mean[S] <- round(summary.fit.mean[1,2],0)
+  
+  # Fit PELT with a penalty multiplier of 30
+  res.pelt <- cpt.meanvar(ori.t2, method = "PELT", penalty = "Manual", pen.value = 30*log(length(ori.t2)))
+  simres.pelt[S] <- Xf[res.pelt@cpts[1]]
+  
+  # Make permutation table of t values
+  perm.t2 <- permtdist(cond1, cond2, Nt, Nf, nboot = nboot)^2
+  perm.th <- apply(perm.t2, 2, quantile, probs = 1-aath)
+
+  perm.pvals <- vector(mode = "numeric", length = Nf)
+  for(F in 1:Nf){
+    perm.pvals[F] <- (sum(perm.t2[,F] >= ori.t2[F]) + 1) / (nboot + 1)
+  }
+
+  # FDR
+  fdr.pvals <- p.adjust(perm.pvals, method = "fdr")
+  simres.fdr[S] <- find_onset(fdr.pvals <= aath, Xf)
+
+  # cluster-sum statistics -----
+  cmap <- cluster.make(perm.pvals <= aath)
+  perm.max.sums <- vector(mode = "numeric", length = nboot)
+  for(B in 1:nboot){
+    # threshold permutation t2 values and form clusters
+    perm.cmap <- cluster.make(perm.t2[B,] <= perm.th)
+    perm.max.sums[B] <- max(cluster.sum(values = perm.t2[B,], cmap = perm.cmap))
+  }
+  # cluster sum threshold
+  cs.th <- quantile(perm.max.sums, probs = 1-aath)
+  # cluster test
+  cs.test <- cluster.test(values = ori.t2, cmap = cmap, cs.th)
+  simres.cs[S] <- find_onset(cs.test, Xf)
+
+
+  # fit non-parametric e.cp3o_delta from ecp package
+  ori.t2 <- matrix(ori.t2, ncol = 1) # ecp only accepts matrices
+
+  # fit ecp cp3o_delta model
+  result_cp3o_delta <- e.cp3o_delta(Z = ori.t2, K = 8, alpha = 1)
+  simres.ecp[S] <- get_earliest_cp(result_cp3o_delta$estimates, Xf)
+}
+
+save(simres.cs, simres.cp, simres.fdr, simres.mcp.mean, simres.mcp, simres.pelt, simres.ecp,
+  file = "./data/main_sim_all_methods.RData")
+
+proc.time()-ptm
+```
+
+```{r, warning=FALSE, fig.height=6, fig.width=8}
+# load("./data/main_sim_all_methods.RData")
+
+# Colour palette from http://www.cookbook-r.com/Graphs/Colors_(ggplot2)/
+categ.palette <- c("#000000", "#E69F00", "#009E73", "#0072B2", "#D55E00", "#CC79A7", "#F0E442")
+
+df <- tibble(onsets = c(simres.cp, simres.cs, simres.mcp, simres.fdr, simres.pelt, simres.ecp),
+             Method = factor(c(rep("BinSeg", length(simres.cp)),
+                               rep("Cluster Sum", length(simres.cs)),
+                               rep("Bayesian (mcp)", length(simres.mcp)),
+                               rep("FDR", length(simres.fdr)),
+                               rep("PELT", length(simres.pelt)),
+                               rep("cp3o_delta", length(simres.ecp))
+                              )))
+
+
+ggplot(data = df, aes(x = onsets, colour = Method)) + theme_gar +
+  # stat_density(geom = "line") +
+  geom_freqpoly(fill = "white", na.rm = TRUE, breaks = Xf) +
+  geom_vline(xintercept = true_onset, linetype = "solid") +
+  # geom_vline(xintercept = median(simres.cp, na.rm = TRUE))
+  scale_colour_manual(values = categ.palette) +
+  theme(legend.position = c(.8, .8)) +
+  labs(x = "Onsets in ms", y = "Count")
+```
+
+## Separate graphs for each method
+```{r, warning=FALSE, fig.height=6, fig.width=6}
+load("./data/main_sim_all_methods.RData")
+
+# Colour palette from http://www.cookbook-r.com/Graphs/Colors_(ggplot2)/
+categ.palette <- c("#000000", "#E69F00", "#009E73", "#0072B2", "#D55E00", "#CC79A7", "#F0E442")
+
+df <- tibble(onsets = simres.mcp,
+             Method = factor(rep("Bayesian (mcp)", length(simres.mcp))))
+
+ggplot(data = df, aes(x = onsets, colour = Method)) + theme_gar +
+  # stat_density(geom = "line") +
+  geom_freqpoly(fill = "white", na.rm = TRUE, breaks = Xf) +
+  geom_vline(xintercept = true_onset, linetype = "solid") +
+  geom_vline(xintercept = median(simres.mcp, na.rm = TRUE), linetype = "dashed") +
+  scale_colour_manual(values = categ.palette) +
+  theme(legend.position = c(.8, .8)) +
+  labs(x = "Onsets in ms", y = "Count") + 
+  ylim(0, 750)
+```
+
+```{r, warning=FALSE, fig.height=6, fig.width=6}
+load("./data/main_sim_all_methods.RData")
+
+# Colour palette from http://www.cookbook-r.com/Graphs/Colors_(ggplot2)/
+categ.palette <- c("#000000", "#E69F00", "#009E73", "#0072B2", "#D55E00", "#CC79A7", "#F0E442")
+
+df <- tibble(onsets = simres.cp,
+             Method = factor(rep("BinSeg", length(simres.cp))))
+
+ggplot(data = df, aes(x = onsets, colour = Method)) + theme_gar +
+  # stat_density(geom = "line") +
+  geom_freqpoly(fill = "white", na.rm = TRUE, breaks = Xf) +
+  geom_vline(xintercept = true_onset, linetype = "solid") +
+  geom_vline(xintercept = median(simres.cp, na.rm = TRUE), linetype = "dashed") +
+  scale_colour_manual(values = categ.palette) +
+  theme(legend.position = c(.8, .8)) +
+  labs(x = "Onsets in ms", y = "Count") + 
+  ylim(0, 750)
+```
+
+```{r, warning=FALSE, fig.height=6, fig.width=6}
+load("./data/main_sim_all_methods.RData")
+
+# Colour palette from http://www.cookbook-r.com/Graphs/Colors_(ggplot2)/
+categ.palette <- c("#000000", "#E69F00", "#009E73", "#0072B2", "#D55E00", "#CC79A7", "#F0E442")
+
+df <- tibble(onsets = simres.cs,
+             Method = factor(rep("Cluster Sum", length(simres.cs))))
+
+ggplot(data = df, aes(x = onsets, colour = Method)) + theme_gar +
+  # stat_density(geom = "line") +
+  geom_freqpoly(fill = "white", na.rm = TRUE, breaks = Xf) +
+  geom_vline(xintercept = true_onset, linetype = "solid") +
+  geom_vline(xintercept = median(simres.cs, na.rm = TRUE), linetype = "dashed") +
+  scale_colour_manual(values = categ.palette) +
+  theme(legend.position = c(.8, .8)) +
+  labs(x = "Onsets in ms", y = "Count") + 
+  ylim(0, 750)
+```
+
+```{r, warning=FALSE, fig.height=6, fig.width=6}
+load("./data/main_sim_all_methods.RData")
+
+# Colour palette from http://www.cookbook-r.com/Graphs/Colors_(ggplot2)/
+categ.palette <- c("#000000", "#E69F00", "#009E73", "#0072B2", "#D55E00", "#CC79A7", "#F0E442")
+
+df <- tibble(onsets = simres.ecp,
+             Method = factor(rep("cp3o_delta", length(simres.ecp))))
+
+ggplot(data = df, aes(x = onsets, colour = Method)) + theme_gar +
+  # stat_density(geom = "line") +
+  geom_freqpoly(fill = "white", na.rm = TRUE, breaks = Xf) +
+  geom_vline(xintercept = true_onset, linetype = "solid") +
+  geom_vline(xintercept = median(simres.ecp, na.rm = TRUE), linetype = "dashed") +
+  scale_colour_manual(values = categ.palette) +
+  theme(legend.position = c(.8, .8)) +
+  labs(x = "Onsets in ms", y = "Count") + 
+  ylim(0, 750)
+```
+
+```{r, warning=FALSE, fig.height=6, fig.width=6}
+load("./data/main_sim_all_methods.RData")
+
+# Colour palette from http://www.cookbook-r.com/Graphs/Colors_(ggplot2)/
+categ.palette <- c("#000000", "#E69F00", "#009E73", "#0072B2", "#D55E00", "#CC79A7", "#F0E442")
+
+df <- tibble(onsets = simres.fdr,
+             Method = factor(rep("FDR", length(simres.fdr))))
+
+ggplot(data = df, aes(x = onsets, colour = Method)) + theme_gar +
+  # stat_density(geom = "line") +
+  geom_freqpoly(fill = "white", na.rm = TRUE, breaks = Xf) +
+  geom_vline(xintercept = true_onset, linetype = "solid") +
+  geom_vline(xintercept = median(simres.fdr, na.rm = TRUE), linetype = "dashed") +
+  scale_colour_manual(values = categ.palette) +
+  theme(legend.position = c(.8, .8)) +
+  labs(x = "Onsets in ms", y = "Count") + 
+  ylim(0, 750)
+```
+
+```{r, warning=FALSE, fig.height=6, fig.width=6}
+load("./data/main_sim_all_methods.RData")
+
+# Colour palette from http://www.cookbook-r.com/Graphs/Colors_(ggplot2)/
+categ.palette <- c("#000000", "#E69F00", "#009E73", "#0072B2", "#D55E00", "#CC79A7", "#F0E442")
+
+df <- tibble(onsets = simres.pelt,
+             Method = factor(rep("PELT", length(simres.pelt))))
+
+ggplot(data = df, aes(x = onsets, colour = Method)) + theme_gar +
+  # stat_density(geom = "line") +
+  geom_freqpoly(fill = "white", na.rm = TRUE, breaks = Xf) +
+  geom_vline(xintercept = true_onset, linetype = "solid") +
+  geom_vline(xintercept = median(simres.pelt, na.rm = TRUE), linetype = "dashed") +
+  scale_colour_manual(values = categ.palette) +
+  theme(legend.position = c(.8, .8)) +
+  labs(x = "Onsets in ms", y = "Count") + 
+  ylim(0, 750)
+```
+
+## Bias
+```{r}
+print("Bias:")
+print(paste("Cluster Sum =",median(simres.cs, na.rm = TRUE) - true_onset))
+print(paste("BinSeg =",median(simres.cp, na.rm = TRUE) - true_onset))
+print(paste("mcp =",round(median(simres.mcp, na.rm=TRUE) - true_onset,0)))
+print(paste("FDR =",round(median(simres.fdr, na.rm=TRUE) - true_onset,0)))
+print(paste("PELT =",round(median(simres.pelt, na.rm=TRUE) - true_onset,0)))
+print(paste("Non-parametric (ecp) =",round(median(simres.ecp, na.rm=TRUE) - true_onset,0)))
+```
+
+## Mean absolute error 
+```{r}
+print("MAE:")
+print(paste("Cluster Sum =",round(mean(abs(simres.cs - true_onset), na.rm = TRUE), digits=1)))
+print(paste("BinSeg =",round(mean(abs(simres.cp - true_onset), na.rm = TRUE), digits=1)))
+print(paste("mcp =",round(mean(abs(simres.mcp - true_onset), na.rm = TRUE), digits=1)))
+print(paste("FDR =",round(mean(abs(simres.fdr - true_onset), na.rm = TRUE), digits=1)))
+print(paste("PELT =",round(mean(abs(simres.pelt - true_onset), na.rm = TRUE), digits=1)))
+print(paste("Non-parametric (ecp) =", round(mean(abs(simres.ecp - true_onset), na.rm = TRUE), digits = 1)))
+```
+
+## Variance 
+
+```{r}
+print("Variance:")
+print(paste("Cluster Sum =",round(var(simres.cs, na.rm = TRUE), digits=0)))
+print(paste("BinSeg =",round(var(simres.cp, na.rm = TRUE), digits=0)))
+print(paste("mcp =",round(var(simres.mcp, na.rm = TRUE), digits=0)))
+print(paste("FDR =",round(var(simres.fdr, na.rm = TRUE), digits=0)))
+print(paste("PELT =",round(var(simres.pelt, na.rm = TRUE), digits=0)))
+print(paste("Non-Parametric (ecp) =",round(var(simres.ecp, na.rm = TRUE), digits=0)))
+```
+
+## Proportion too early
+```{r}
+print("Proportion too early:")
+print(paste("Cluster Sum =",round(100*mean((simres.cs - true_onset) < 0, na.rm = TRUE), digits=1),"%"))
+print(paste("BinSeg =",round(100*mean((simres.cp - true_onset) < 0, na.rm = TRUE), digits=1),"%"))
+print(paste("mcp =",round(100*mean((simres.mcp - true_onset) < 0, na.rm = TRUE), digits=1),"%"))
+print(paste("FDR =",round(100*mean((simres.fdr - true_onset) < 0, na.rm = TRUE), digits=1),"%"))
+print(paste("PELT =",round(100*mean((simres.pelt - true_onset) < 0, na.rm = TRUE), digits=1),"%"))
+print(paste("Non-parametric (ecp) =",round(100*mean((simres.ecp - true_onset) < 0, na.rm = TRUE), digits=1),"%"))
+```
+
+## Underestimations of at least 40 ms
+```{r}
+print("Underestimations of at least 40 ms:")
+print(paste("Cluster Sum =",round(100*mean((simres.cs - true_onset) <= -40, na.rm = TRUE), digits=1),"%"))
+print(paste("BinSeg =",round(100*mean((simres.cp - true_onset) <= -40, na.rm = TRUE), digits=1),"%"))
+print(paste("mcp =",round(100*mean((simres.mcp - true_onset) <= -40, na.rm = TRUE), digits=1),"%"))
+print(paste("FDR =",round(100*mean((simres.fdr - true_onset) <= -40, na.rm = TRUE), digits=1),"%"))
+print(paste("PELT =",round(100*mean((simres.pelt - true_onset) <= -40, na.rm = TRUE), digits=1),"%"))
+print(paste("Non-parametric (ecp) =",round(100*mean((simres.ecp - true_onset) <= -40, na.rm = TRUE), digits=1),"%"))
+```
+
+
+#### Merging simulations results 
+```{r}
+# Set the directory containing the .RData files
+setwd("./big_sim_data/")
+
+# List all .RData files in the directory
+files <- list.files(pattern = "\\.RData$")
+
+combined_simres_cs <- list()
+combined_simres_fdr <- list()
+combined_simres_cp <- list()
+combined_simres_pelt <- list()
+combined_simres_mcp <- list()
+combined_simres_ecp <- list()
+
+# Loop through each file, load data, and combine it
+for (file in files) {
+  load(file)
+  combined_simres_cs[[file]] <- simres.cs
+  combined_simres_fdr[[file]] <- simres.fdr
+  combined_simres_cp[[file]] <- simres.cp
+  combined_simres_pelt[[file]] <- simres.pelt
+  combined_simres_mcp[[file]] <- simres.mcp
+  combined_simres_ecp[[file]] <- simres.ecp
+}
+
+# Convert the list of matrices into single matrices for each variable
+simres.cs <- do.call(rbind, combined_simres_cs)
+simres.fdr <- do.call(rbind, combined_simres_fdr)
+simres.cp <- do.call(rbind, combined_simres_cp)
+simres.pelt <- do.call(rbind, combined_simres_pelt)
+simres.mcp <- do.call(rbind, combined_simres_mcp)
+simres.ecp <- do.call(rbind, combined_simres_ecp)
+
+# Save the combined datasets into a single .RData file
+save(simres.cs, simres.fdr, simres.cp, simres.pelt, simres.mcp, simres.ecp,
+     file = "./big_sim_joined_data.RData")
+
+```
+
+```{r, warning=FALSE, fig.height=6, fig.width=8}
+load("./big_sim_data/big_sim_joined_data.RData")
+
+# Colour palette from http://www.cookbook-r.com/Graphs/Colors_(ggplot2)/
+categ.palette <- c("#000000", "#E69F00", "#009E73", "#0072B2", "#D55E00", "#CC79A7", "#F0E442")
+
+df <- tibble(onsets = c(simres.cp, simres.cs, simres.mcp, simres.fdr, simres.pelt, simres.ecp),
+             Method = factor(c(rep("BinSeg", length(simres.cp)),
+                               rep("Cluster Sum", length(simres.cs)),
+                               rep("Bayesian (mcp)", length(simres.mcp)),
+                               rep("FDR", length(simres.fdr)),
+                               rep("PELT", length(simres.pelt)),
+                               rep("cp3o_delta", length(simres.ecp))
+                              )))
+
+
+ggplot(data = df, aes(x = onsets, colour = Method)) + theme_gar +
+  # stat_density(geom = "line") +
+  geom_freqpoly(fill = "white", na.rm = TRUE, breaks = Xf) +
+  geom_vline(xintercept = true_onset, linetype = "solid") +
+  # geom_vline(xintercept = median(simres.cp, na.rm = TRUE))
+  scale_colour_manual(values = categ.palette) +
+  theme(legend.position = c(.8, .8)) +
+  labs(x = "Onsets in ms", y = "Count")
+```

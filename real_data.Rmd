@@ -1,0 +1,1256 @@
+---
+output:
+  pdf_document:
+    fig_caption: no
+    number_sections: no
+    toc: yes
+    toc_depth: 2
+    # github_document:
+    # html_preview: yes
+    # toc: yes
+    # toc_depth: 2
+editor_options: 
+  chunk_output_type: inline
+---
+
+Processing and plotting the analysis from the real EEG participant data set taken from study by Bieniek and colleagues (2016).
+
+# Dependencies
+```{r setup, message=FALSE}
+library(ggplot2)
+library(tibble)
+library(cowplot)
+library(beepr)
+library(Rfast)
+library(changepoint)
+library(mcp)
+library(rjags)
+library(mutoss)
+library(ecp)
+library(readr)
+library(dplyr)
+source("./code/functions.R")
+source("./code/theme_gar.txt")
+# Edit `one_over_f` function from `primer` package to control variance (Stevens, 2009). 
+# Original function is available on [GitHub](https://github.com/HankStevens/primer).
+# Copyright Hank Stevens.
+source("./code/one_over_f.R")
+# Load template: true onset = 160 ms, F=81, max at F=126
+source("./code/erp_template.R")
+# R version of Matlab code from Yeung et al. 2004
+source("./code/eeg_noise.R")
+# Lodaing the code that gives median instead of mean values in mcp summary table
+source("./code/mcp_median_function.R")
+# to use with eeg_noise function
+meanpower <- unlist(read.table("./code/meanpower.txt"))
+s <- seq(-300,600,2) # time vector for Bieniek data (from -300 to 600 ms)
+
+# x axis range for plots 
+xa <- -150 # minimum 
+xb <- 250 # maximum
+```
+
+## Example time course from participant 1
+```{r message=FALSE, warning=FALSE, include=FALSE}
+library(readr)
+p1 <- read_csv("./ftonsets_results_p1_p120_1000_permutations/participant_p1_s1_maxt2.txt", col_names = NA)
+
+
+df <- tibble(x = s,
+             y = p1$X1)
+
+p.mcp <- ggplot(df, aes(x, y)) + theme_gar + 
+  geom_line(linewidth = 1) +
+  labs(x = "Time in ms", y = bquote(t^2)) +
+  ggtitle(paste("participant 1 maxt2"))
+```
+
+## Example time course from participant 2
+```{r}
+p2 <- read_csv("./ftonsets_results_p1_p120_1000_permutations/participant_p2_s1_maxt2.txt", col_names = NA)
+
+df <- tibble(x = s,
+             y = p2$X1)
+
+p.mcp <- ggplot(df, aes(x, y)) + theme_gar + 
+  geom_line(linewidth = 1) +
+  # geom_vline(xintercept = true_onset) +
+  # geom_vline(xintercept = summary_fit[1,2], linetype = "dotted") +
+  labs(x = "Time in ms", y = bquote(t^2)) +
+  ggtitle(paste("participant 2 maxt2"))
+```
+
+```{r}
+p2 <- read_csv("./ftonsets_results_p1_p120_1000_permutations/participant_p2_s2_maxt2.txt", col_names = NA)
+
+options(mc.cores = 3)
+df <- tibble(x = s, y = p2$X1)
+
+model <- list(
+  y ~ 1 + sigma(1),
+    ~ 0 + x + sigma(1)
+)
+
+prior <- list(
+  cp_1 = "dunif(50,150)"
+)
+
+fit <- mcp(model, prior = prior, data = df, cores = 3, chains = 3)
+summary.fit.median <- summary.mcpfit.median(fit)
+pt.mcp <- round(summary.fit.median[1,2],0)
+
+p.mcp <- ggplot(df, aes(x, y)) + theme_gar + 
+  geom_line(linewidth = 1) +
+  # geom_vline(xintercept = true_onset) +
+  geom_vline(xintercept = pt.mcp, linetype = "solid") +
+  labs(x = "Time in ms", y = bquote(t^2)) +
+  ggtitle(paste("mcp estimated onset =",pt.mcp,"ms"))
+```
+
+## Apply BinSeg
+```{r}
+res.cp <- cpt.meanvar(p2$X1, method = "BinSeg", Q=2)
+pt.cp <- s[res.cp@cpts[1]]
+
+df <- tibble(x = s,
+             y = p2$X1)
+
+p.cp <- ggplot(df, aes(x, y)) + theme_gar + 
+  geom_line(linewidth = 1) +
+  # geom_vline(xintercept = true_onset) +
+  geom_vline(xintercept = pt.cp, linetype = "solid") +
+  labs(x = "Time in ms", y = bquote(t^2)) +
+  ggtitle(paste("BinSeg estimated onset =",pt.cp,"ms"))
+```
+
+
+## Apply PELT
+```{r}
+
+res.pelt <- cpt.meanvar(p2$X1, method = "PELT", penalty = "Manual", pen.value = 30*log(length(p2$X1)))
+pt.pelt <- s[res.pelt@cpts[1]]
+
+df <- tibble(x = s,
+             y = p2$X1)
+
+p.pelt <- ggplot(df, aes(x, y)) + theme_gar + 
+  geom_line(linewidth = 1) +
+  # geom_vline(xintercept = true_onset) +
+  geom_vline(xintercept = pt.pelt, linetype = "solid") +
+  labs(x = "Time in ms", y = bquote(t^2)) +
+  ggtitle(paste("PELT estimated onset =",pt.pelt,"ms"))
+```
+
+
+## Apply ecp
+```{r}
+
+p2.matrix <- matrix(p2$X1, ncol = 1)
+
+res.ecp <- e.cp3o_delta(Z = p2.matrix, K = 7, alpha = 1)
+pt.ecp <- get_earliest_cp(res.ecp$estimates, s)
+
+df <- tibble(x = s,
+             y = p2$X1)
+
+p.ecp <- ggplot(df, aes(x, y)) + theme_gar + 
+  geom_line(linewidth = 1) +
+  # geom_vline(xintercept = true_onset) +
+  geom_vline(xintercept = pt.ecp, linetype = "solid") +
+  labs(x = "Time in ms", y = bquote(t^2)) +
+  ggtitle(paste("cp3o estimated onset =",pt.ecp,"ms"))
+```
+
+## Apply mcp
+```{r}
+options(mc.cores = 3)
+df <- tibble(x = s, y = p2$X1)
+
+model <- list(
+  y ~ 1 + sigma(1),
+    ~ 0 + x + sigma(1)
+)
+
+prior <- list(
+  cp_1 = "dunif(50,150)"
+)
+
+fit <- mcp(model, prior = prior, data = df, cores = 3, chains = 3)
+summary.fit.median <- summary.mcpfit.median(fit)
+pt.mcp <- round(summary.fit.median[1,2],0)
+
+p.mcp <- ggplot(df, aes(x, y)) + theme_gar + 
+  geom_line(linewidth = 1) +
+  # geom_vline(xintercept = true_onset) +
+  geom_vline(xintercept = pt.mcp, linetype = "solid") +
+  labs(x = "Time in ms", y = bquote(t^2)) +
+  ggtitle(paste("mcp estimated onset =",pt.mcp,"ms"))
+```
+
+
+
+## Cluster based test results
+```{r include=FALSE, message=FALSE}
+
+# reading in cluster sum onsets from the file for session 1
+cs.data.s1 <- read_csv("./ftonsets_results_p1_p120_1000_permutations/participants_s1_onsets.txt", col_names = FALSE)
+cs.data.s1 <- as.numeric(unlist(cs.data.s1))
+cs.data.s1 <- tibble(session1.cp = cs.data.s1)
+row.names(cs.data.s1) <- paste("participant", seq_len(nrow(cs.data.s1)))
+
+# reading in session 2
+cs.data.s2 <- read_csv("./ftonsets_results_p1_p120_1000_permutations/participants_s2_onsets.txt", col_names = FALSE)
+cs.data.s2 <- as.numeric(unlist(cs.data.s2))
+cs.data.s2 <- tibble(session2.cp = cs.data.s2)
+row.names(cs.data.s2) <- paste("participant", seq_len(nrow(cs.data.s2)))
+
+temp.cs.data.s1 <- cs.data.s1
+temp.cs.data.s1$participant.id <- row.names(temp.cs.data.s1)
+temp.cs.data.s2 <- cs.data.s2
+temp.cs.data.s2$participant.id <- row.names(temp.cs.data.s2)
+
+cs.data <- merge(temp.cs.data.s1, temp.cs.data.s2, by = "participant.id")
+row.names(cs.data) <- cs.data$participant.id
+cs.data$participant.id <- NULL
+rm(temp.cs.data.s1, temp.cs.data.s2)
+cs.data <- cs.data[complete.cases(cs.data),]
+
+# plotting graph showing participant 2 curve with an onset location estimated by cluster sum
+cs.onset <- cs.data["participant 2",1]
+
+df <- tibble(x = s,
+             y = p2$X1)
+
+p.cs <- ggplot(df, aes(x, y)) + theme_gar + 
+  geom_line(linewidth = 1) +
+  # geom_vline(xintercept = true_onset) +
+  geom_vline(xintercept = cs.onset, linetype = "solid") +
+  labs(x = "Time in ms", y = bquote(t^2)) +
+  ggtitle(paste("cluster based correction onset =",cs.onset,"ms"))
+p.cs
+```
+
+
+```{r fig.height=8, fig.width=10}
+cowplot::plot_grid(p.cp, p.pelt, p.ecp, p.mcp,
+                   nrow = 2,
+                   labels = c("A", "B", "C", "D"),
+                   label_size = 15)
+```
+
+
+## Participant 2 onset in session 2
+
+```{r}
+p2 <- read_csv("./ftonsets_results_p1_p120_1000_permutations/participant_p2_s2_maxt2.txt", col_names = NA)
+
+df <- tibble(x = s,
+             y = p2$X1)
+
+# No effect localisation algorithm
+ggplot(df, aes(x, y)) + theme_gar + 
+  geom_line(linewidth = 1) +
+  # geom_vline(xintercept = true_onset) +
+  # geom_vline(xintercept = summary_fit[1,2], linetype = "dotted") +
+  labs(x = "Time in ms", y = bquote(t^2)) +
+  ggtitle(paste("participant 2 maxt2"))
+
+
+# BinSeg
+res.cp <- cpt.meanvar(p2$X1, method = "BinSeg", Q=2)
+pt.cp <- s[res.cp@cpts[1]]
+
+df <- tibble(x = s,
+             y = p2$X1)
+
+p.cp <- ggplot(df, aes(x, y)) + theme_gar + 
+  geom_line(linewidth = 1) +
+  # geom_vline(xintercept = true_onset) +
+  geom_vline(xintercept = pt.cp, linetype = "solid") +
+  labs(x = "Time in ms", y = bquote(t^2)) +
+  ggtitle(paste("BinSeg estimated onset =",pt.cp,"ms"))
+
+
+# PELT
+res.pelt <- cpt.meanvar(p2$X1, method = "PELT", penalty = "Manual", pen.value = 30*log(length(p2$X1)))
+pt.pelt <- s[res.pelt@cpts[1]]
+
+df <- tibble(x = s,
+             y = p2$X1)
+
+p.pelt <- ggplot(df, aes(x, y)) + theme_gar + 
+  geom_line(linewidth = 1) +
+  # geom_vline(xintercept = true_onset) +
+  geom_vline(xintercept = pt.pelt, linetype = "solid") +
+  labs(x = "Time in ms", y = bquote(t^2)) +
+  ggtitle(paste("PELT estimated onset =",pt.pelt,"ms"))
+
+
+# mcp
+options(mc.cores = 3)
+df <- tibble(x = s, y = p2$X1)
+
+model <- list(
+  y ~ 1 + sigma(1),
+    ~ 0 + x + sigma(1)
+)
+
+prior <- list(
+  cp_1 = "dunif(50,150)"
+)
+
+fit <- mcp(model, prior = prior, data = df, cores = 3, chains = 3)
+summary.fit.median <- summary.mcpfit.median(fit)
+pt.mcp <- round(summary.fit.median[1,2],0)
+
+p.mcp <- ggplot(df, aes(x, y)) + theme_gar + 
+  geom_line(linewidth = 1) +
+  geom_vline(xintercept = pt.mcp, linetype = "solid") +
+  labs(x = "Time in ms", y = bquote(t^2)) +
+  ggtitle(paste("mcp estimated onset =",pt.mcp,"ms"))
+
+
+
+# Function to restrict cp3o_delta to record the first detected change point in the 150-250ms time window
+# get_earliest_cp <- function(cps, Xf) {
+#   # Filter the change points based on the time window
+#   valid_cps <- cps[Xf[cps] >= 150 & Xf[cps] <= 250]
+# 
+#   if (length(valid_cps) > 0) {
+#     # Find the earliest point within the valid time window
+#     earliest_index <- min(valid_cps)
+#     # Convert to time course using the time vector
+#     earliest_time <- Xf[earliest_index]
+#     return(earliest_time)
+#   } else {
+#     return(NA)  # Return NA if no valid change points were found in the specified time window
+#   }
+# }
+
+
+
+# cp3o
+p2.matrix <- matrix(p2$X1, ncol = 1)
+
+res.ecp <- e.cp3o_delta(Z = p2.matrix, K = 7, alpha = 1)
+pt.ecp <- get_earliest_cp(res.ecp$estimates, s)
+# pt.ecp <- s[res.ecp$estimates]
+
+df <- tibble(x = s,
+             y = p2$X1)
+
+p.ecp <- ggplot(df, aes(x, y)) + theme_gar + 
+  geom_line(linewidth = 1) +
+  # geom_vline(xintercept = true_onset) +
+  geom_vline(xintercept = pt.ecp, linetype = "solid") +
+  labs(x = "Time in ms", y = bquote(t^2)) +
+  ggtitle(paste("cp3o estimated onset =",pt.ecp,"ms"))
+
+p.cp
+p.pelt
+p.ecp
+p.mcp
+```
+
+
+## Calculating the difference in estimates between the methods across both testing sessions
+### BinSeg
+```{r include=FALSE, message=FALSE, warning=FALSE}
+p2.s1 <- read_csv("./p1_p120_2_sessions/participant_p2_s1_maxt2.txt", col_names = NA)
+p2.s2 <- read_csv("./p1_p120_2_sessions/participant_p2_s2_maxt2.txt", col_names = NA)
+
+res.cp <- cpt.meanvar(p2.s1$X1, method = "BinSeg", Q=2)
+pt1.cp <- s[res.cp@cpts[1]]
+
+res.cp <- cpt.meanvar(p2.s1$X1, method = "BinSeg", Q=2)
+pt2.cp <- s[res.cp@cpts[1]]
+
+df <- tibble(x = s,
+             y = p2.s1$X1,
+             z = p2.s2$X1)
+
+p.cp <- ggplot(df, aes(x)) + theme_gar + 
+  geom_line(aes(y = y), colour = "#E69F00", linewidth = 1) +
+  geom_line(aes(y = z), colour = "black", linewidth = 1) +
+  geom_vline(xintercept = pt1.cp, linetype = "solid", colour = "#E69F00") +
+  geom_vline(xintercept = pt2.cp, linetype = "solid", colour = "black") +
+  labs(x = "Time in ms", y = bquote(t^2)) +
+  ggtitle(paste("BinSeg. Session 1 =",pt1.cp,"ms, Session 2 =",pt2.cp,"ms")) + 
+  theme(plot.title = element_text(size = 20))
+```
+
+
+## PELT
+```{r inlcude=FALSE, message=FALSE, warning=FALSE}
+res.pelt <- cpt.meanvar(p2.s1$X1, method = "PELT", penalty = "Manual", pen.value = 30*log(length(p2.s1$X1)))
+pt1.pelt <- s[res.pelt@cpts[1]]
+
+res.pelt <- cpt.meanvar(p2.s2$X1, method = "PELT", penalty = "Manual", pen.value = 30*log(length(p2.s2$X1)))
+pt2.pelt <- s[res.pelt@cpts[1]]
+
+df <- tibble(x = s,
+             y = p2.s1$X1,
+             z = p2.s2$X1)
+
+p.pelt <- ggplot(df, aes(x)) + theme_gar + 
+  geom_line(aes(y = y), colour = "#E69F00", linewidth = 1) +
+  geom_line(aes(y = z), colour = "black", linewidth = 1) +
+  geom_vline(xintercept = pt1.pelt, linetype = "solid", colour = "#E69F00") +
+  geom_vline(xintercept = pt2.pelt, linetype = "solid", colour = "black") +
+  labs(x = "Time in ms", y = bquote(t^2)) +
+  ggtitle(paste("PELT. Session 1 =",pt1.pelt,"ms, Session 2 =",pt2.pelt,"ms")) + 
+  theme(plot.title = element_text(size = 20))
+```
+
+
+### ecp
+```{r include=FALSE, warning=FALSE, message=FALSE}
+
+p2.s1.matrix <- matrix(p2.s1$X1, ncol = 1)
+p2.s2.matrix <- matrix(p2.s2$X1, ncol = 1)
+
+res.ecp <- e.cp3o_delta(Z = p2.s1.matrix, K = 8, alpha = 1)
+pt1.ecp <- get_earliest_cp(res.ecp$estimates, s)
+
+res.ecp <- e.cp3o_delta(Z = p2.s2.matrix, K = 8, alpha = 1)
+pt2.ecp <- get_earliest_cp(res.ecp$estimates, s)
+
+df <- tibble(x = s,
+             y = p2.s1$X1,
+             z = p2.s2$X1)
+
+p.ecp <- ggplot(df, aes(x)) + theme_gar + 
+  geom_line(aes(y = y), colour = "#E69F00", linewidth = 1) +
+  geom_line(aes(y = z), colour = "black", linewidth = 1) +
+  geom_vline(xintercept = pt1.ecp, linetype = "solid", colour = "#E69F00") +
+  geom_vline(xintercept = pt2.ecp, linetype = "solid", colour = "black") +
+  labs(x = "Time in ms", y = bquote(t^2)) +
+  ggtitle(paste("cp3o_delta. Session 1 =",pt1.ecp,"ms, Session 2 =",pt2.ecp,"ms")) + 
+  theme(plot.title = element_text(size = 12))
+```
+
+## mcp
+```{r include=FALSE, message=FALSE, warning=FALSE}
+options(mc.cores = 3)
+df.1 <- tibble(x = s, y = p2.s1$X1)
+df.2 <- tibble(x = s, y = p2.s2$X1)
+
+model <- list(
+  y ~ 1 + sigma(1),
+    ~ 0 + x + sigma(1)
+)
+
+prior <- list(
+  cp_1 = "dunif(50,150)"
+)
+
+fit1 <- mcp(model, prior = prior, data = df.1, cores = 3, chains = 3)
+summary.fit.median1 <- summary.mcpfit.median(fit1)
+pt1.mcp <- round(summary.fit.median1[1,2],0)
+
+fit2 <- mcp(model, prior = prior, data = df.2, cores = 3, chains = 3)
+summary.fit.median2 <- summary.mcpfit.median(fit2)
+pt2.mcp <- round(summary.fit.median2[1,2],0)
+
+df <- tibble(x = s,
+             y = p2.s1$X1,
+             z = p2.s2$X1)
+
+p.mcp <- ggplot(df, aes(x)) + theme_gar + 
+  geom_line(aes(y = y), colour = "#E69F00", linewidth = 1) +
+  geom_line(aes(y = z), colour = "black", linewidth = 1) +
+  geom_vline(xintercept = pt1.mcp, linetype = "solid", colour = "#E69F00") +
+  geom_vline(xintercept = pt2.mcp, linetype = "solid", colour = "black") +
+  labs(x = "Time in ms", y = bquote(t^2)) +
+  ggtitle(paste("mcp. Session 1 =",pt1.mcp,"ms, Session 2 =",pt2.mcp,"ms")) + 
+  theme(plot.title = element_text(size = 20))
+```
+
+## cluster-sum
+```{r include=FALSE, warning=FALSE, message=FALSE}
+cs.onset.p2.s1 <- cs.data["participant 30",1]
+cs.onset.p2.s2 <- cs.data["participant 30",2]
+
+df <- tibble(x = s,
+             y = p2.s1$X1,
+             z = p2.s2$X1)
+
+p.cs <- ggplot(df, aes(x)) + theme_gar + 
+  geom_line(aes(y = y), colour = "#E69F00", linewidth = 1) +
+  geom_line(aes(y = z), colour = "black", linewidth = 1) +
+  geom_vline(xintercept = cs.onset.p2.s1, linetype = "solid", colour = "#E69F00") +
+  geom_vline(xintercept = cs.onset.p2.s2, linetype = "solid", colour = "black") +
+  labs(x = "Time in ms", y = bquote(t^2)) +
+  ggtitle(paste("CS: session 1 =",cs.onset.p2.s1,"ms, session 2 =",cs.onset.p2.s2,"ms")) + 
+  theme(plot.title = element_text(size = 20))
+```
+
+```{r fig.height=8, fig.width=10}
+cowplot::plot_grid(p.cp, p.pelt, p.ecp, p.mcp,
+                   nrow = 2,
+                   labels = c("A", "B", "C", "D"),
+                   label_size = 15)
+```
+
+## Now doing the same but across the 75 participants tested twice.
+### Read in the data
+```{r include=FALSE}
+data.directory <- "./p1_p120_2_sessions"
+
+participant.data <- list()
+
+for (i in 1:90) {
+  
+  file.s1 <- sprintf("%s/participant_p%d_s1_maxt2.txt", data.directory, i)
+  file.s2 <- sprintf("%s/participant_p%d_s2_maxt2.txt", data.directory, i)
+  
+  if (file.exists(file.s1) && file.exists(file.s2)) {
+    
+    data.s1 <- read_csv(file.s1, col_names = FALSE)
+    data.s2 <- read_csv(file.s2, col_names = FALSE)
+    
+    combined.data <- data.frame(session1 = data.s1$X1, session2 = data.s2$X1)
+
+    participant.data[[paste("participant", i)]] <- combined.data
+  }
+}
+```
+
+## Apply methods
+### BinSeg
+```{r eval=FALSE, warning=FALSE}
+
+change.points.cp <- list()
+
+
+for (participant_id in names(participant.data)) {
+
+  participant.df <- participant.data[[participant_id]]
+
+  res.cp1 <- cpt.meanvar(participant.df$session1, method = "BinSeg", Q=2)
+  pt1.cp <- s[res.cp1@cpts[1]]
+
+  res.cp2 <- cpt.meanvar(participant.df$session2, method = "BinSeg", Q=2)
+  pt2.cp <- s[res.cp2@cpts[1]]
+
+  change.points.cp[[participant_id]] <- list(session1.cp = pt1.cp, session2.cp = pt2.cp)
+}
+
+change.points.cp.df <- do.call(rbind, lapply(change.points.cp, function(x) as.data.frame(t(unlist(x)))))
+rownames(change.points.cp.df) <- names(change.points.cp)
+save(change.points.cp, file = "./data/change.points.cp")
+save(change.points.cp.df, file = "./data/change.points.cp.df")
+```
+
+### PELT
+```{r eval=FALSE}
+change.points.pelt <- list()
+
+for (participant_id in names(participant.data)) {
+  
+  participant.df <- participant.data[[participant_id]]
+  
+  res.pelt1 <- cpt.meanvar(participant.df$session1, method = "PELT", penalty = "Manual", pen.value = 30*log(length(p2$X1)))
+  pt1.pelt <- s[res.pelt1@cpts[1]]
+  
+  res.pelt2 <- cpt.meanvar(participant.df$session2, method = "PELT", penalty = "Manual", pen.value = 30*log(length(p2$X1)))
+  pt2.pelt <- s[res.pelt2@cpts[1]]
+  
+  change.points.pelt[[participant_id]] <- list(session1.cp = pt1.pelt, session2.cp = pt2.pelt)
+}
+
+change.points.pelt.df <- do.call(rbind, lapply(change.points.pelt, function(x) as.data.frame(t(unlist(x)))))
+rownames(change.points.pelt.df) <- names(change.points.cp)
+save(change.points.pelt, file = "./data/change.points.pelt")
+save(change.points.pelt.df, file = "./data/change.points.pelt.df")
+```
+
+### ecp
+```{r eval=FALSE}
+change.points.ecp <- list()
+
+for (participant_id in names(participant.data)) {
+  
+  participant.df <- participant.data[[participant_id]]
+  
+  session1.matrix <- matrix(participant.df$session1, ncol = 1)
+  session2.matrix <- matrix(participant.df$session2, ncol = 1)
+  
+  res.ecp1 <- e.cp3o_delta(Z = session1.matrix, K = 8, alpha = 1)
+  pt1.ecp <- get_earliest_cp(res.ecp1$estimates, s)
+  
+  res.ecp2 <- e.cp3o_delta(Z = session2.matrix, K = 8, alpha = 1)
+  pt2.ecp <- get_earliest_cp(res.ecp2$estimates, s)
+  
+  change.points.ecp[[participant_id]] <- list(session1.cp = pt1.ecp, session2.cp = pt2.ecp)
+}
+
+change.points.ecp.df <- do.call(rbind, lapply(change.points.ecp, function(x) as.data.frame(t(unlist(x)))))
+rownames(change.points.ecp.df) <- names(change.points.ecp)
+
+save(change.points.ecp, file = "./data/change.points.ecp")
+save(change.points.ecp.df, file = "./data/change.points.ecp.df")
+```
+
+### mcp
+```{r message=FALSE, include=FALSE, eval=FALSE}
+options(mc.cores = 3)
+change.points.mcp <- list()
+
+model <- list(
+  y ~ 1 + sigma(1),
+    ~ 0 + x + sigma(1)
+)
+
+prior <- list(
+  cp_1 = "dunif(50, 150)"
+)
+
+for (participant_id in names(participant.data)) {
+  participant.df <- participant.data[[participant_id]]
+  
+  df.s1 <- tibble(x = s, y = participant.df$session1)
+  df.s2 <- tibble(x = s, y = participant.df$session2)
+  
+  fit1 <- mcp(model, prior = prior, data = df.s1, cores = 3, chains = 3)
+  summary.fit.median1 <- summary.mcpfit.median(fit1)
+  pt1.mcp <- round(summary.fit.median1[1,2],0)
+  
+  fit2 <- mcp(model, prior = prior, data = df.s2, cores = 3, chains = 3)
+  summary.fit.median2 <- summary.mcpfit.median(fit2)
+  pt2.mcp <- round(summary.fit.median2[1,2],0)
+  
+  change.points.mcp[[participant_id]] <- list(session1.mcp = pt1.mcp, session2.mcp = pt2.mcp)
+}
+
+change.points.mcp.df <- do.call(rbind, lapply(change.points.mcp, function(x) as.data.frame(t(unlist(x)))))
+rownames(change.points.mcp.df) <- names(change.points.mcp)
+save(change.points.mcp, file = "./data/change.points.mcp")
+save(change.points.mcp.df, file = "./data/change.points.mcp.df")
+```
+
+
+#### Calculating mean and median distributions of onset for each method 
+```{r}
+
+load(file = "./data/change.points.cp.df")
+load(file = "./data/change.points.mcp.df")
+load(file = "./data/change.points.ecp.df")
+load(file = "./data/change.points.pelt.df")
+
+###############################################
+# median of differences between groups ----
+session1.median.cp <- median(change.points.cp.df$session1.cp)
+session2.median.cp <- median(change.points.cp.df$session2.cp)
+change.points.cp.df$difference <- abs(change.points.cp.df$session1.cp - change.points.cp.df$session2.cp)
+diff.median.cp <- median(change.points.cp.df$difference)
+
+session1.median.pelt <- median(change.points.pelt.df$session1.cp)
+session2.median.pelt <- median(change.points.pelt.df$session2.cp)
+change.points.pelt.df$difference <- abs(change.points.pelt.df$session1.cp - change.points.pelt.df$session2.cp)
+diff.median.pelt <- median(change.points.pelt.df$difference)
+
+session1.median.ecp <- median(change.points.ecp.df$session1.cp, na.rm = TRUE)
+session2.median.ecp <- median(change.points.ecp.df$session2.cp, na.rm = TRUE)
+change.points.ecp.df$difference <- abs(change.points.ecp.df$session1.cp - change.points.ecp.df$session2.cp)
+diff.median.ecp <- median(change.points.ecp.df$difference, na.rm = TRUE)
+
+session1.median.mcp <- median(change.points.mcp.df$session1.mcp)
+session2.median.mcp <- median(change.points.mcp.df$session2.mcp)
+change.points.mcp.df$difference <- abs(change.points.mcp.df$session1.mcp - change.points.mcp.df$session2.mcp)
+diff.median.mcp <- median(change.points.mcp.df$difference)
+
+session1.median.cs <- median(cs.data$session1.cp)
+session2.median.cs <- median(cs.data$session2.cp)
+cs.data$difference <- abs(cs.data$session1.cp - cs.data$session2.cp)
+diff.median.cs <- median(cs.data$difference)
+
+```
+
+
+## Plotting onset distributions 
+#### BinSeg
+```{r}
+library(tidyr)
+
+load(file = "./data/change.points.cp.df")
+
+df <- change.points.cp.df |> pivot_longer(cols = everything(), names_to = "session", values_to = "change.points")
+
+categ.palette <- c("#000000", "#E69F00", "#009E73", "#0072B2", "#D55E00", "#CC79A7")
+
+p.cp1 <- ggplot(data = df, aes(x = change.points, color = session)) + theme_gar +
+  geom_freqpoly(binwidth = 3, size = .7, na.rm = TRUE) +  
+  scale_color_manual(values = categ.palette) +
+  labs(x = "Change Point Onsets in ms", y = "Frequency", color = "Session") +
+  geom_vline(xintercept = session1.median.cp, linetype = "solid", colour = "#000000") +
+  geom_vline(xintercept = session2.median.cp, linetype = "solid", colour = "#E69F00") +
+  ggtitle("B: BinSeg") +
+  xlim(xa,xb) + ylim(0,15) + 
+  theme(legend.position = "none")
+
+df <- change.points.cp.df |>
+  mutate(participant_id = rownames(.))
+
+p.cp2 <- ggplot(data = df, aes(x = session1.cp, y = session2.cp)) +
+  geom_point(color = "#000000", size = 3, alpha = 0.6) +  
+  geom_smooth(method = "lm", se = FALSE, color = "#E69F00", fullrange = TRUE) + 
+  labs(x = "Session 1 Onset (ms)", y = "Session 2 Onset (ms)") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "#000000") +
+  ggtitle("B: BinSeg") +
+  xlim(xa, xb) + ylim(xa, xb) + 
+  theme_gar +
+  theme(legend.position = "none") +
+  coord_fixed(ratio = 1)
+```
+
+### PELT
+```{r}
+load(file = "./data/change.points.pelt.df")
+df <- change.points.pelt.df |> pivot_longer(cols = everything(), names_to = "session", values_to = "change.points")
+
+categ.palette <- c("#000000", "#E69F00", "#009E73", "#0072B2", "#D55E00", "#CC79A7")
+
+p.pelt1 <- ggplot(data = df, aes(x = change.points, color = session)) + theme_gar +
+  geom_freqpoly(binwidth = 3, size = .7, na.rm = TRUE) +  
+  scale_color_manual(values = categ.palette) +
+  labs(x = "Change Point Onsets in ms", y = "Frequency", color = "Session") +
+  geom_vline(xintercept = session1.median.pelt, linetype = "solid", colour = "#000000") +
+  geom_vline(xintercept = session2.median.pelt, linetype = "solid", colour = "#E69F00") +
+  ggtitle("C: PELT") + 
+  xlim(xa,xb) + ylim(0,15) + 
+  theme(legend.position = "none")
+
+df <- change.points.pelt.df |>
+  mutate(participant_id = rownames(.))
+
+p.pelt2 <- ggplot(data = df, aes(x = session1.cp, y = session2.cp)) +
+  geom_point(color = "#000000", size = 3, alpha = 0.6) +  
+  geom_smooth(method = "lm", se = FALSE, color = "#E69F00", fullrange = TRUE) + 
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "#000000") +
+  labs(x = "Session 1 Onset (ms)", y = "Session 2 Onset (ms)") +
+  ggtitle("C: PELT") +
+  xlim(xa, xb) + ylim(xa, xb) + 
+  theme_gar +
+  theme(legend.position = "none") +
+  coord_fixed(ratio = 1)
+```
+
+### ecp
+```{r}
+load(file = "./data/change.points.ecp.df")
+df <- change.points.ecp.df |> pivot_longer(cols = everything(), names_to = "session", values_to = "change.points")
+
+categ.palette <- c("#000000", "#E69F00", "#009E73", "#0072B2", "#D55E00", "#CC79A7")
+
+p.ecp1 <- ggplot(data = df, aes(x = change.points, color = session)) + theme_gar +
+  geom_freqpoly(binwidth = 3, size = .7, na.rm = TRUE) +  
+  scale_color_manual(values = categ.palette) +
+  labs(x = "Change Point Onsets in ms", y = "Frequency", color = "Session") +
+  geom_vline(xintercept = session1.median.ecp, linetype = "solid", colour = "#000000") +
+  geom_vline(xintercept = session2.median.ecp, linetype = "solid", colour = "#E69F00") +
+  ggtitle("D: cp3o_delta") + 
+  xlim(xa,xb) + ylim(0,15) + 
+  theme(legend.position = "none")
+
+df <- change.points.ecp.df |>
+  mutate(participant_id = rownames(.))
+
+p.ecp2 <- ggplot(data = df, aes(x = session1.cp, y = session2.cp)) +
+  geom_point(color = "#000000", size = 3, alpha = 0.6) +  
+  geom_smooth(method = "lm", se = FALSE, color = "#E69F00", fullrange = TRUE) + 
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "#000000") +
+  labs(x = "Session 1 Onset (ms)", y = "Session 2 Onset (ms)") +
+  ggtitle("D: cp3o_delta") +
+  xlim(xa, xb) + ylim(xa, xb) + 
+  theme_gar +
+  theme(legend.position = "none") +
+  coord_fixed(ratio = 1)
+```
+
+### mcp
+```{r}
+load(file = "./data/change.points.mcp.df")
+df <- change.point <- change.points.mcp.df |> pivot_longer(cols = everything(), names_to = "session", values_to = "change.points")
+
+categ.palette <- c("#000000", "#E69F00", "#009E73", "#0072B2", "#D55E00", "#CC79A7")
+
+p.mcp1 <- ggplot(data = df, aes(x = change.points, color = session)) + theme_gar +
+  geom_freqpoly(binwidth = 3, size = .7, na.rm = TRUE) +  
+  scale_color_manual(values = categ.palette) +
+  labs(x = "Change Point Onsets in ms", y = "Frequency", color = "Session") +
+  geom_vline(xintercept = session1.median.mcp, linetype = "solid", colour = "#000000") +
+  geom_vline(xintercept = session2.median.mcp, linetype = "solid", colour = "#E69F00") +
+  ggtitle("E: mcp") + 
+  xlim(xa,xb) + ylim(0,15) +
+  theme(legend.position = "none")
+
+df <- change.points.mcp.df |>
+  mutate(participant_id = rownames(.))
+
+p.mcp2 <- ggplot(data = df, aes(x = session1.mcp, y = session2.mcp)) +
+  geom_point(color = "#000000", size = 3, alpha = 0.6) +  
+  geom_smooth(method = "lm", se = FALSE, color = "#E69F00", fullrange = TRUE) + 
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "#000000") +
+  labs(x = "Session 1 Onset (ms)", y = "Session 2 Onset (ms)") +
+  ggtitle("E: mcp") +
+  xlim(xa, xb) + ylim(xa, xb) + 
+  theme_gar +
+  theme(legend.position = "none") +
+  coord_fixed(ratio = 1)
+```
+
+#### cluster sum
+```{r}
+df <- cs.data |> pivot_longer(cols = everything(), names_to = "session", values_to = "change.points")
+
+categ.palette <- c("#000000", "#E69F00", "#009E73", "#0072B2", "#D55E00", "#CC79A7")
+
+p.cs1 <- ggplot(data = df, aes(x = change.points, color = session)) + theme_gar +
+  geom_freqpoly(binwidth = 3, size = .7, na.rm = TRUE) +  
+  scale_color_manual(values = categ.palette) +
+  labs(x = "Change Point Onsets in ms", y = "Frequency", color = "Session") +
+  ggtitle("A: CS") + 
+  geom_vline(xintercept = median(cs.data$session1.cp), linetype = "solid", colour = "#000000") +
+  geom_vline(xintercept = median(cs.data$session2.cp), linetype = "solid", colour = "#E69F00") +
+  xlim(xa,xb) + ylim(0,15) +
+  theme(legend.position = "none")
+
+df <- cs.data |>
+  mutate(participant_id = rownames(.))
+
+p.cs2 <- ggplot(data = df, aes(x = session1.cp, y = session2.cp)) +
+  geom_point(color = "#000000", size = 3, alpha = 0.6) +  
+  geom_smooth(method = "lm", se = FALSE, color = "#E69F00", fullrange = TRUE) + 
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "#000000") +
+  labs(x = "Session 1 Onset (ms)", y = "Session 2 Onset (ms)") +
+  ggtitle("A: Cluster-based approach") +
+  xlim(xa, xb) + ylim(xa, xb) + 
+  theme_gar +
+  theme(legend.position = "none") +
+  coord_fixed(ratio = 1)
+```
+
+#### Joined figure 
+```{r}
+joined.cs <- cs.data
+joined.cs$difference <- NULL
+colnames(joined.cs)[1] <- "session1.cs"
+colnames(joined.cs)[2] <- "session2.cs"
+
+joined.cp <- change.points.cp.df
+colnames(joined.cp)[1] <- "session1.cp"
+colnames(joined.cp)[2] <- "session2.cp"
+
+joined.pelt <- change.points.pelt.df
+colnames(joined.pelt)[1] <- "session1.pelt"
+colnames(joined.pelt)[2] <- "session2.pelt"
+
+joined.ecp <- change.points.ecp.df
+colnames(joined.ecp)[1] <- "session1.ecp"
+colnames(joined.ecp)[2] <- "session2.ecp"
+
+joined.mcp <- change.points.mcp.df
+colnames(joined.mcp)[1] <- "session1.mcp"
+colnames(joined.mcp)[2] <- "session2.mcp"
+
+joined.s1.s2 <- cbind(joined.cs, joined.cp, joined.pelt, joined.ecp, joined.mcp)
+
+point.size <- 1.3
+point.alpha <- 0.6
+line.width <- 0.7
+
+p.s1.s2.2 <- ggplot() +
+  geom_point(data = joined.s1.s2, aes(x = session1.cs, y = session2.cs, color = "CS"), size = point.size, alpha = point.alpha) +
+  geom_smooth(data = joined.s1.s2, aes(x = session1.cs, y = session2.cs, color = "CS"), method = "lm", se = FALSE, fullrange = TRUE, linewidth = line.width) +
+  geom_point(data = joined.s1.s2, aes(x = session1.cp, y = session2.cp, color = "BinSeg"), size = point.size, alpha = point.alpha) +
+  geom_smooth(data = joined.s1.s2, aes(x = session1.cp, y = session2.cp, color = "BinSeg"), method = "lm", se = FALSE, fullrange = TRUE, linewidth = line.width) +
+  geom_point(data = joined.s1.s2, aes(x = session1.ecp, y = session2.ecp, color = "cp3o_delta"), size = point.size, alpha = point.alpha) +
+  geom_smooth(data = joined.s1.s2, aes(x = session1.ecp, y = session2.ecp, color = "cp3o_delta"), method = "lm", se = FALSE, fullrange = TRUE, linewidth = line.width) +
+  geom_point(data = joined.s1.s2, aes(x = session1.pelt, y = session2.pelt, color = "PELT"), size = point.size, alpha = point.alpha) +
+  geom_smooth(data = joined.s1.s2, aes(x = session1.pelt, y = session2.pelt, color = "PELT"), method = "lm", se = FALSE, fullrange = TRUE, linewidth = line.width) +
+  geom_point(data = joined.s1.s2, aes(x = session1.mcp, y = session2.mcp, color = "mcp"), size = point.size, alpha = point.alpha) +
+  geom_smooth(data = joined.s1.s2, aes(x = session1.mcp, y = session2.mcp, color = "mcp"), method = "lm", se = FALSE, fullrange = TRUE, linewidth = line.width) +
+  labs(x = "Session 1 Onset (ms)", y = "Session 2 Onset (ms)", color = "Method") +
+  xlim(-250, 400) + ylim(-250, 400) + 
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "#000000") +
+  ggtitle("Participant onset distribution across both sessions as 
+estimated by each of the five methods") +
+  theme_gar +
+  theme(legend.position = "right", plot.title = element_text(size = 13)) +
+  coord_fixed(ratio = 1)
+
+# Define color scale manually
+p.s1.s2.2 <- p.s1.s2.2 + scale_color_manual(values = c(
+  "CS" = "#009E73", 
+  "BinSeg" = "#E69F00",
+  "cp3o_delta" = "#0072B2",
+  "PELT" = "#CC79A7",
+  "mcp"="#D55E00"
+))
+p.s1.s2.2
+```
+
+```{r fig.width=8, fig.height=6}
+data_long <- pivot_longer(
+  joined.s1.s2,
+  cols = everything(),
+  names_to = c("method", "session"),
+  names_sep = "\\.",
+  values_to = "onset"
+)
+
+data_long <- data_long |> 
+  mutate(group = interaction(method, session))
+
+# Calculate medians
+medians <- data_long |> 
+  group_by(group) |> 
+  summarise(median = median(onset, na.rm = TRUE), .groups = 'drop') |> 
+  mutate(group = factor(group, levels = c(
+    "session1.cs", "session2.cs",
+    "session1.cp", "session2.cp",
+    "session1.mcp", "session2.mcp",
+    "session1.pelt", "session2.pelt",
+    "session1.ecp", "session2.ecp"
+  )))
+
+
+data_long <- data_long |> 
+  mutate(group = factor(group, levels = c(
+    "session1.ecp", "session2.ecp",
+    "session1.pelt", "session2.pelt",
+    "session1.mcp", "session2.mcp",
+    "session1.cp", "session2.cp",
+    "session1.cs", "session2.cs"
+  )))
+
+# Custom colour mapping
+color_map <- c(
+  "session1.cs" = "#009E73", "session2.cs" = "#009E73",
+  "session1.cp" = "#E69F00", "session2.cp" = "#E69F00",
+  "session1.mcp" = "#D55E00", "session2.mcp" = "#D55E00",
+  "session1.pelt" = "#CC79A7", "session2.pelt" = "#CC79A7",
+  "session1.ecp" = "#0072B2", "session2.ecp" = "#0072B2"
+)
+
+p.box <- ggplot(data_long, aes(x = group, y = onset, fill = group)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.6) +
+  geom_jitter(width = 0.15, size = 1, alpha = 0.4, color = "black") +
+  scale_fill_manual(values = color_map) +
+  labs(x = "Session", y = "Onset (ms)", title = "Onset Times by Method and Session") +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 20)) +
+  theme_gar +
+  coord_flip()
+p.box
+```
+
+
+```{r fig.height=8, fig.width=10}
+cowplot::plot_grid(p.cp1, p.pelt1, p.ecp1, p.mcp1, p.cs1,
+                   nrow = 3,
+                   labels = c("A", "B", "C", "D", "E"),
+                   label_size = 15)
+```
+
+```{r fig.height=8, fig.width=8}
+
+cowplot::plot_grid(p.cp2, p.pelt2, p.ecp2, p.mcp2, p.cs2,
+                   nrow = 3,
+                   labels = c("A", "B", "C", "D", "E"),
+                   label_size = 15)
+```
+
+## Onset distributions for all participants from session 1
+```{r include=FALSE}
+data.directory <- "./p1_p120_session_1"
+
+participant.data.s1 <- list()
+
+for (i in 1:120) {
+  
+  file.s1 <- sprintf("%s/participant_p%d_s1_maxt2.txt", data.directory, i)
+  
+  if (file.exists(file.s1)) {
+    
+    data.s1 <- read_csv(file.s1, col_names = FALSE)
+
+    participant.data.s1[[paste("participant", i)]] <- data.frame(session1 = data.s1$X1)
+  }
+}
+```
+
+### Identifying onsets
+#### BinSeg
+```{r eval=FALSE, warning=FALSE}
+change.points.cp.s1 <- list()
+
+for (participant_id in names(participant.data.s1)) {
+
+  participant.df <- participant.data.s1[[participant_id]]
+
+  res.cp <- cpt.meanvar(participant.df$session1, method = "BinSeg", Q=2)
+  pt.cp <- s[res.cp@cpts[1]]
+
+
+  change.points.cp.s1[[participant_id]] <- list(session1.cp = pt.cp)
+}
+
+change.points.cp.df.s1 <- do.call(rbind, lapply(change.points.cp.s1, function(x) as.data.frame(t(unlist(x)))))
+rownames(change.points.cp.df.s1) <- names(change.points.cp.s1)
+save(change.points.cp.df.s1, file = "./data/change.points.cp.df.s1")
+```
+
+#### PELT
+```{r eval=FALSE}
+change.points.pelt.s1 <- list()
+
+for (participant_id in names(participant.data.s1)) {
+
+  participant.df <- participant.data.s1[[participant_id]]
+
+  res.pelt <- cpt.meanvar(participant.df$session1, method = "PELT", penalty = "Manual", pen.value = 30*log(length(p2$X1)))
+  
+  pt.pelt <- s[res.pelt@cpts[1]]
+
+
+  change.points.pelt.s1[[participant_id]] <- list(session1.cp = pt.pelt)
+}
+
+change.points.pelt.df.s1 <- do.call(rbind, lapply(change.points.pelt.s1, function(x) as.data.frame(t(unlist(x)))))
+rownames(change.points.pelt.df.s1) <- names(change.points.pelt.s1)
+save(change.points.pelt.df.s1, file = "./data/change.points.pelt.df.s1")
+```
+
+#### ecp
+```{r eval=FALSE}
+change.points.ecp.s1 <- list()
+
+for (participant_id in names(participant.data.s1)) {
+  
+  participant.df <- participant.data.s1[[participant_id]]
+  
+  session1.matrix <- matrix(participant.df$session1, ncol = 1)
+  
+  res.ecp <- e.cp3o_delta(Z = session1.matrix, K = 8, alpha = 1)
+  
+  pt.ecp <- get_earliest_cp(res.ecp$estimates, s)
+  
+  change.points.ecp.s1[[participant_id]] <- list(session1_cp = pt.ecp)
+}
+
+change.points.ecp.df.s1 <- do.call(rbind, lapply(change.points.ecp.s1, function(x) as.data.frame(t(unlist(x)))))
+rownames(change.points.ecp.df.s1) <- names(change.points.ecp.s1)
+
+save(change.points.ecp.df.s1, file = "./data/change.points.ecp.df.s1")
+```
+
+#### mcp
+```{r include=FALSE, eval=FALSE}
+change.points.mcp.s1 <- list()
+
+options(mc.cores = 3)
+prior <- list(
+  cp_1 = "dunif(50, 150)"
+)
+
+model <- list(
+  y ~ 1 + sigma(1),
+    ~ 0 + x + sigma(1)
+)
+
+for (participant_id in names(participant.data.s1)) {
+  
+  participant.df <- participant.data.s1[[participant_id]]
+  
+  df.s1 <- tibble(x = s, y = participant.df$session1)
+  
+  fit1 <- mcp(model, prior = prior, data = df.s1, cores = 3, chains = 3)
+  
+  summary.fit.median1 <- summary.mcpfit.median(fit1)
+  
+  pt1.mcp <- round(summary.fit.median1[1,2],0)
+  
+  change.points.mcp.s1[[participant_id]] <- list(session1_mcp = pt1.mcp)
+}
+
+change.points.mcp.df.s1 <- do.call(rbind, lapply(change.points.mcp.s1, function(x) as.data.frame(t(unlist(x)))))
+rownames(change.points.mcp.df.s1) <- names(change.points.mcp.s1)
+save(change.points.mcp.df.s1, file = "./data/change.points.mcp.df.s1")
+```
+
+#### summary statistics
+
+```{r}
+
+load(file = "./data/change.points.cp.df.s1")
+load(file = "./data/change.points.pelt.df.s1")
+load(file = "./data/change.points.ecp.df.s1")
+load(file = "./data/change.points.mcp.df.s1")
+# load(file = "./data/cs.data.s1")
+
+# Medians
+session1.120.median.cp <- round(median(change.points.cp.df.s1$session1.cp),0)
+
+session1.120.median.pelt <- median(change.points.pelt.df.s1$session1.cp)
+
+session1.120.median.ecp <- median(change.points.ecp.df.s1$session1_cp, na.rm = TRUE)
+
+session1.120.median.mcp <- median(change.points.mcp.df.s1$session1_mcp)
+```
+
+
+#### BinSeg distribution plot
+```{r}
+library(tidyr)
+
+df <- change.points.cp.df.s1 |> pivot_longer(cols = everything(), names_to = "session", values_to = "change.points")
+
+categ.palette <- c("#000000", "#E69F00", "#009E73", "#0072B2", "#D55E00", "#CC79A7")
+
+p.s1.cp <- ggplot(data = df, aes(x = change.points, color = session)) + theme_gar +
+  geom_freqpoly(binwidth = 1, size = .6, na.rm = TRUE, alpha = 0) +  
+  scale_color_manual(values = categ.palette) +
+  labs(x = "Time in ms", y = "Frequency", color = "Session") +
+  ggtitle(paste("BinSeg, median onset =",session1.120.median.cp,"ms")) +
+  geom_vline(xintercept = session1.120.median.cp, linetype = "dashed") +
+  xlim(xa,xb) + ylim(0,11) + 
+  geom_density(aes(y = ..scaled..*8.5), alpha = .3, adjust = .1, colour = "#E69F00", linewidth = .8) +
+  theme(legend.position = "none", plot.title = element_text(size = 20))
+p.s1.cp
+```
+
+#### PELT distribution plot
+```{r}
+df <- change.points.pelt.df.s1 |> pivot_longer(cols = everything(), names_to = "session", values_to = "change.points")
+
+categ.palette <- c("#000000", "#E69F00", "#009E73", "#0072B2", "#D55E00", "#CC79A7")
+
+p.s1.pelt <- ggplot(data = df, aes(x = change.points, color = session)) + theme_gar +
+  geom_freqpoly(binwidth = 1, size = .6, na.rm = TRUE, alpha = 0) +  
+  scale_color_manual(values = categ.palette) +
+  labs(x = "Time in ms", y = "Frequency", color = "Session") +
+  ggtitle(paste("PELT, median onset =",session1.120.median.pelt,"ms")) +
+  geom_vline(xintercept = session1.120.median.pelt, linetype = "dashed") +
+  xlim(xa,xb) + ylim(0,11) + 
+  geom_density(aes(y = ..scaled..*8.5), alpha = .3, adjust = .1, colour = "#CC79A7", linewidth = .8) +
+  theme(legend.position = "none", plot.title = element_text(size = 20)) 
+p.s1.pelt
+```
+
+#### cp3o_delta distribution plot
+```{r}
+df <- change.points.ecp.df.s1 |> pivot_longer(cols = everything(), names_to = "session", values_to = "change.points")
+
+categ.palette <- c("#000000", "#E69F00", "#009E73", "#0072B2", "#D55E00", "#CC79A7")
+
+p.s1.ecp <- ggplot(data = df, aes(x = change.points, color = session)) + theme_gar +
+  geom_freqpoly(binwidth = 1, size = .6, na.rm = TRUE, alpha = 0) +  
+  scale_color_manual(values = categ.palette) +
+  geom_density(aes(y = ..scaled..*8.5), alpha = .3, adjust = .1, colour = "#0072B2", linewidth = .8) +
+  labs(x = "Time in ms", y = "Frequency", color = "Session") +
+  geom_vline(xintercept = session1.120.median.ecp, linetype = "dashed") +
+  ggtitle(paste("cp3o_delta, median onset =",session1.120.median.ecp,"ms")) +
+  xlim(xa,xb) + ylim(0,11) + 
+  theme(legend.position = "none", plot.title = element_text(size = 20))
+p.s1.ecp
+```
+
+#### mcp distribution plots
+```{r}
+df <- change.points.mcp.df.s1 |> pivot_longer(cols = everything(), names_to = "session", values_to = "change.points")
+
+categ.palette <- c("#000000", "#E69F00", "#009E73", "#0072B2", "#D55E00", "#CC79A7")
+
+p.s1.mcp <- ggplot(data = df, aes(x = change.points, color = session)) + theme_gar +
+  geom_freqpoly(binwidth = 1, size = .6, na.rm = TRUE, alpha = 0) +  
+  scale_color_manual(values = categ.palette) +
+  labs(x = "Time in ms", y = "Frequency", color = "Session") +
+  ggtitle(paste("mcp, median onset =",session1.120.median.mcp,"ms")) +
+  geom_vline(xintercept = session1.120.median.mcp, linetype = "dashed") +
+  xlim(xa,xb) + ylim(0,11) + 
+  geom_density(aes(y = ..scaled..*8.5), alpha = .3, adjust = .1, colour = "#D55E00", linewidth = .8) +
+  theme(legend.position = "none", plot.title = element_text(size = 20))
+p.s1.mcp
+```
+
+#### cluster sum distribution plot
+```{r}
+df <- cs.data.s1 |> pivot_longer(cols = everything(), names_to = "session", values_to = "change.points")
+
+categ.palette <- c("#000000", "#E69F00", "#009E73", "#0072B2", "#D55E00", "#CC79A7")
+
+session1.120.median.cs <- median(cs.data.s1$session1.cp)
+
+p.s1.cs <- ggplot(data = df, aes(x = change.points, color = session)) + theme_gar +
+  geom_freqpoly(binwidth = 1, size = .6, na.rm = TRUE, alpha = 0) +  
+  scale_color_manual(values = categ.palette) +
+  labs(x = "Time in ms", y = "Frequency", color = "Session") +
+  ggtitle(paste("CS, median onset =",session1.120.median.mcp,"ms")) +
+  geom_vline(xintercept = session1.120.median.cs, linetype = "dashed") +
+  xlim(xa,xb) + ylim(0,11) + 
+  geom_density(aes(y = ..scaled..*8.5), alpha = .3, adjust = .1, colour = "#009E73", linewidth = .8) +
+  theme(legend.position = "none", plot.title = element_text(size = 20))
+p.s1.cs
+```
+
+#### joined plot
+```{r fig.height=8, fig.width=10}
+change.points.cp.df.s1 <- change.points.cp.df.s1  |>  mutate(method = "BinSeg")
+change.points.pelt.df.s1 <- change.points.pelt.df.s1 |> mutate(method = "PELT")
+change.points.ecp.df.s1 <- change.points.ecp.df.s1 |> mutate(method = "cp3o_delta")
+change.points.mcp.df.s1 <- change.points.mcp.df.s1 |> mutate(method = "MCP")
+cs.data.s1 <- cs.data.s1 |> mutate(method = "CS")
+
+# Combine all data frames into one
+combined_df <- bind_rows(change.points.cp.df.s1, change.points.pelt.df.s1, change.points.ecp.df.s1, change.points.mcp.df.s1, cs.data.s1) |>
+  pivot_longer(cols = starts_with("session"), names_to = "session", values_to = "change.points")
+
+# Add median onset values for each method if needed for plotting
+combined_df <- combined_df |>
+  mutate(median_onset = case_when(
+    method == "BinSeg" ~ session1.120.median.cp,
+    method == "PELT" ~ session1.120.median.pelt,
+    method == "cp3o_delta" ~ session1.120.median.ecp,
+    method == "MCP" ~ session1.120.median.mcp,
+    method == "CS" ~ session1.120.median.cs
+  ))
+
+p.unified <- ggplot(combined_df, aes(x = change.points, color = method, group = method)) +
+  geom_freqpoly(aes(y = ..count..), binwidth = 1, size = .6, alpha = 0) +  # Transparent frequency polygon
+  geom_density(aes(y = ..scaled..*8.5), adjust = 0.1, size = 0.8, fill = NA, linetype = "solid") +  # Density plot
+  scale_color_manual(values = c(
+    "BinSeg" = "#009E73", 
+    "PELT" = "#CC79A7", 
+    "cp3o_delta" = "#0072B2", 
+    "MCP" = "#D55E00", 
+    "CS" = "#E69F00"
+  )) +
+  labs(x = "Time in ms", y = "Frequency", color = "Method") +  # Adjust y-label to "Frequency"
+  ggtitle("All methods") +
+  theme_gar +
+  # theme(legend.position = c(0.4, 0.9),  # Position inside the plot
+  #       legend.justification = c("right", "top"),  # Anchors legend at position
+  #       legend.box.background = element_rect(color = "black", size = 0.5),  # Optional border around legend
+  #       legend.background = element_rect(fill = "white", size = 0.5, linetype = "solid")) +
+  theme(legend.position = "none", plot.title = element_text(size = 15)) +
+  xlim(xa, xb) + ylim(0, 11) +
+  geom_vline(xintercept = session1.120.median.cp, colour = "#009E73", linetype = "dashed") +
+  geom_vline(xintercept = session1.120.median.cs, colour = "#E69F00", linetype = "dashed") +
+  geom_vline(xintercept = session1.120.median.pelt, colour = "#CC79A7", linetype = "dashed") +
+  geom_vline(xintercept = session1.120.median.mcp, colour = "#D55E00", linetype = "dashed") +
+  geom_vline(xintercept = session1.120.median.ecp, colour = "#0072B2", linetype = "dashed")
+
+p.unified
+```
+
+
+```{r fig.height=8, fig.width=10}
+cowplot::plot_grid(p.unified, p.s1.cp, p.s1.pelt, p.s1.ecp, p.s1.mcp, p.s1.cs,
+                   nrow = 3,
+                   labels = c("A", "B", "C", "D", "E", "F"),
+                   label_size = 15)
+```
+
+Bieniek MM, Bennett PJ, Sekuler AB, Rousselet GA (2016) A robust and representative lower bound on object processing speed in humans. The European Journal of Neuroscience, 44(2), 1804–1814. https://doi.org/10.1111/ejn.13100

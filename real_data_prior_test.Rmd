@@ -1,0 +1,292 @@
+---
+output:
+  pdf_document:
+    fig_caption: no
+    number_sections: no
+    toc: yes
+    toc_depth: 2
+    # github_document:
+    # html_preview: yes
+    # toc: yes
+    # toc_depth: 2
+editor_options: 
+  chunk_output_type: inline
+---
+
+Here I looked into how onset estimates from participant data from Bieniek and colleagues (2016) vary when mcp is fed different priors. This helped establish that using different priors did not impact the general participant onset distributions and therefore did not impact the overall conclusions. As a result, priors of 50-150ms were used to compare mcp with others when considering the real EEG participant data. 
+
+# Dependencies
+```{r setup, message=FALSE}
+library(ggplot2)
+library(tibble)
+library(cowplot)
+library(beepr)
+library(Rfast)
+library(changepoint)
+library(mcp)
+library(rjags)
+library(mutoss)
+library(ecp)
+library(readr)
+library(dplyr)
+library(tidyverse)
+source("./code/functions.R")
+source("./code/theme_gar.txt")
+# Edit `one_over_f` function from `primer` package to control variance (Stevens, 2009). 
+# Original function is available on [GitHub](https://github.com/HankStevens/primer).
+# Copyright Hank Stevens.
+source("./code/one_over_f.R")
+# Load template: true onset = 160 ms, F=81, max at F=126
+source("./code/erp_template.R")
+# R version of Matlab code from Yeung et al. 2004
+source("./code/eeg_noise.R")
+# Lodaing the code that gives median instead of mean values in mcp summary table
+source("./code/mcp_median_function.R")
+# to use with eeg_noise function
+meanpower <- unlist(read.table("./code/meanpower.txt"))
+```
+
+## Normal priors (50-150ms)
+```{r}
+p2.s1 <- read_csv("./p1_p120_2_sessions/participant_p2_s1_maxt2.txt", col_names = NA)
+p2.s2 <- read_csv("./p1_p120_2_sessions/participant_p2_s2_maxt2.txt", col_names = NA)
+
+s <- seq(-300, 600, 2)
+
+options(mc.cores = 3)
+df.1 <- tibble(x = s, y = p2.s1$X1)
+df.2 <- tibble(x = s, y = p2.s2$X1)
+
+model <- list(
+  y ~ 1 + sigma(1),
+    ~ 0 + x + sigma(1)
+)
+
+prior <- list(
+  cp_1 = "dunif(50,150)"
+)
+
+fit1 <- mcp(model, prior = prior, data = df.1, cores = 3, chains = 3)
+summary.fit.median1 <- summary.mcpfit.median(fit1)
+pt1.mcp <- round(summary.fit.median1[1,2],0)
+
+fit2 <- mcp(model, prior = prior, data = df.2, cores = 3, chains = 3)
+summary.fit.median2 <- summary.mcpfit.median(fit2)
+pt2.mcp <- round(summary.fit.median2[1,2],0)
+
+df <- tibble(x = s,
+             y = p2.s1$X1,
+             z = p2.s2$X1)
+
+p.mcp <- ggplot(df, aes(x)) + theme_gar + 
+  geom_line(aes(y = y), colour = "#E69F00", linewidth = 1) +
+  geom_line(aes(y = z), colour = "black", linewidth = 1) +
+  geom_vline(xintercept = pt1.mcp, linetype = "solid", colour = "#E69F00") +
+  geom_vline(xintercept = pt2.mcp, linetype = "solid", colour = "black") +
+  labs(x = "Time in ms", y = bquote(t^2)) +
+  ggtitle(paste("mcp. Session 1 =",pt1.mcp,"ms, Session 2 =",pt2.mcp,"ms")) + 
+  theme(plot.title = element_text(size = 12))
+p.mcp
+```
+
+## Wide priors (0, 200)
+```{r}
+options(mc.cores = 3)
+
+prior <- list(
+  cp_1 = "dunif(0,200)"
+)
+
+fit1 <- mcp(model, prior = prior, data = df.1, cores = 3, chains = 3)
+summary.fit.median1 <- summary.mcpfit.median(fit1)
+pt1.mcp <- round(summary.fit.median1[1,2],0)
+
+fit2 <- mcp(model, prior = prior, data = df.2, cores = 3, chains = 3)
+summary.fit.median2 <- summary.mcpfit.median(fit2)
+pt2.mcp <- round(summary.fit.median2[1,2],0)
+
+df <- tibble(x = s,
+             y = p2.s1$X1,
+             z = p2.s2$X1)
+
+p.mcp <- ggplot(df, aes(x)) + theme_gar + 
+  geom_line(aes(y = y), colour = "#E69F00", linewidth = 1) +
+  geom_line(aes(y = z), colour = "black", linewidth = 1) +
+  geom_vline(xintercept = pt1.mcp, linetype = "solid", colour = "#E69F00") +
+  geom_vline(xintercept = pt2.mcp, linetype = "solid", colour = "black") +
+  labs(x = "Time in ms", y = bquote(t^2)) +
+  ggtitle(paste("mcp. Session 1 =",pt1.mcp,"ms, Session 2 =",pt2.mcp,"ms")) + 
+  theme(plot.title = element_text(size = 12))
+p.mcp
+```
+
+### Read in the data
+```{r include=FALSE}
+data.directory <- "./p1_p120_2_sessions"
+
+participant.data <- list()
+
+for (i in 1:90) {
+  
+  file.s1 <- sprintf("%s/participant_p%d_s1_maxt2.txt", data.directory, i)
+  file.s2 <- sprintf("%s/participant_p%d_s2_maxt2.txt", data.directory, i)
+  
+  if (file.exists(file.s1) && file.exists(file.s2)) {
+    
+    data.s1 <- read_csv(file.s1, col_names = FALSE)
+    data.s2 <- read_csv(file.s2, col_names = FALSE)
+    
+    combined.data <- data.frame(session1 = data.s1$X1, session2 = data.s2$X1)
+
+    participant.data[[paste("participant", i)]] <- combined.data
+  }
+}
+```
+```{r}
+# Limits for the plots to ensure all plot limits can be changed simultaneously
+xa <- -150 # Lower limit
+xb <- 250 # Upper limit
+```
+
+## Normal prior for group (50-150ms)
+```{r}
+
+load(file = "./data/change.points.mcp.df")
+
+session1.median.mcp <- median(change.points.mcp.df$session1.mcp)
+session2.median.mcp <- median(change.points.mcp.df$session2.mcp)
+diff.median.mcp <- session1.median.mcp - session2.median.mcp
+
+df <- change.points.mcp.df |> pivot_longer(cols = everything(), names_to = "session", values_to = "change.points")
+
+categ.palette <- c("#000000", "#E69F00", "#009E73", "#0072B2", "#D55E00", "#CC79A7")
+
+p.mcp1 <- ggplot(data = df, aes(x = change.points, color = session)) + theme_gar +
+  geom_freqpoly(binwidth = 3, size = .7, na.rm = TRUE) +  
+  scale_color_manual(values = categ.palette) +
+  labs(x = "Change Point Onsets in ms", y = "Frequency", color = "Session") +
+  geom_vline(xintercept = session1.median.mcp, linetype = "solid", colour = "#000000") +
+  geom_vline(xintercept = session2.median.mcp, linetype = "solid", colour = "#E69F00") +
+  xlim(xa,xb) + ylim(0,15) +
+  ggtitle(paste("Standard priors (50-150ms). Session 1 median onset =",session1.median.mcp,"ms. Session 2 median onset =",session2.median.mcp,"ms")) +
+  theme(legend.position = "none", plot.title = element_text(size = 11))
+p.mcp1
+
+df <- change.points.mcp.df %>%
+  mutate(participant_id = rownames(.))
+
+p.mcp2 <- ggplot(data = df, aes(x = session1.mcp, y = session2.mcp)) +
+  geom_point(color = "#000000", size = 3, alpha = 0.6) +  
+  geom_smooth(method = "lm", se = FALSE, color = "#E69F00", fullrange = TRUE) + 
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "#000000") +
+  labs(x = "Session 1 Onset (ms)", y = "Session 2 Onset (ms)") +
+  xlim(xa, xb) + ylim(xa, xb) + 
+  theme_gar +
+  theme(legend.position = "none") +
+  coord_fixed(ratio = 1)
+p.mcp2
+```
+
+## Wide prior for group (-50-250ms)
+```{r message=FALSE, include=FALSE}
+options(mc.cores = 3)
+change.points.mcp.wide.prior <- list()
+
+model <- list(
+  y ~ 1 + sigma(1),
+    ~ 0 + x + sigma(1)
+)
+
+prior <- list(
+  cp_1 = "dunif(0, 200)"
+)
+
+for (participant_id in names(participant.data)) {
+  participant.df <- participant.data[[participant_id]]
+  
+  df.s1 <- tibble(x = s, y = participant.df$session1)
+  df.s2 <- tibble(x = s, y = participant.df$session2)
+  
+  fit1 <- mcp(model, prior = prior, data = df.s1, cores = 3, chains = 3)
+  summary.fit.median1 <- summary.mcpfit.median(fit1)
+  pt1.mcp <- round(summary.fit.median1[1,2],0)
+  
+  fit2 <- mcp(model, prior = prior, data = df.s2, cores = 3, chains = 3)
+  summary.fit.median2 <- summary.mcpfit.median(fit2)
+  pt2.mcp <- round(summary.fit.median2[1,2],0)
+  
+  change.points.mcp.wide.prior[[participant_id]] <- list(session1.mcp = pt1.mcp, session2.mcp = pt2.mcp)
+}
+
+change.points.mcp.wide.prior.df <- do.call(rbind, lapply(change.points.mcp.wide.prior, function(x) as.data.frame(t(unlist(x)))))
+rownames(change.points.mcp.wide.prior.df) <- names(change.points.mcp.wide.prior)
+save(change.points.mcp.wide.prior, file = "./data/change.points.mcp.wide.prior")
+save(change.points.mcp.wide.prior.df, file = "./data/change.points.mcp.wide.prior.df")
+```
+
+```{r}
+load(file = "./data/change.points.mcp.wide.prior.df")
+
+session1.median.mcp <- median(change.points.mcp.wide.prior.df$session1.mcp)
+session2.median.mcp <- median(change.points.mcp.wide.prior.df$session2.mcp)
+diff.median.mcp <- session1.median.mcp - session2.median.mcp
+
+df <- change.points.mcp.wide.prior.df |> pivot_longer(cols = everything(), names_to = "session", values_to = "change.points")
+
+categ.palette <- c("#000000", "#E69F00", "#009E73", "#0072B2", "#D55E00", "#CC79A7")
+
+p.mcp1 <- ggplot(data = df, aes(x = change.points, color = session)) + theme_gar +
+  geom_freqpoly(binwidth = 3, size = .7, na.rm = TRUE) +  
+  scale_color_manual(values = categ.palette) +
+  labs(x = "Change Point Onsets in ms", y = "Frequency", color = "Session") +
+  geom_vline(xintercept = session1.median.mcp, linetype = "solid", colour = "#000000") +
+  geom_vline(xintercept = session2.median.mcp, linetype = "solid", colour = "#E69F00") +
+  xlim(xa,xb) + ylim(0,15) +
+  ggtitle(paste("Wide priors (0-200ms). Session 1 median onset =",session1.median.mcp,"ms. Session 2 median onset =",session2.median.mcp,"ms")) +
+  theme(legend.position = "none", plot.title = element_text(size = 11))
+p.mcp1
+
+df <- change.points.mcp.wide.prior.df %>%
+  mutate(participant_id = rownames(.))
+
+p.mcp2 <- ggplot(data = df, aes(x = session1.mcp, y = session2.mcp)) +
+  geom_point(color = "#000000", size = 3, alpha = 0.6) +  
+  geom_smooth(method = "lm", se = FALSE, color = "#E69F00", fullrange = TRUE) + 
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "#000000") +
+  labs(x = "Session 1 Onset (ms)", y = "Session 2 Onset (ms)") +
+  xlim(xa, xb) + ylim(xa, xb) + 
+  theme_gar +
+  theme(legend.position = "none") +
+  coord_fixed(ratio = 1)
+p.mcp2
+
+df2 <- df
+```
+
+## Combined plot
+```{r}
+point.size <- 1.5
+point.alpha <- 0.4
+line.width <- 0.8
+
+prior.plot <- ggplot() + 
+  geom_point(data = df, aes(x = session1.mcp, y = session2.mcp, colour = "50-150ms prior"), size = point.size, alpha = point.alpha) + 
+  geom_smooth(data = df, aes(x = session1.mcp, y = session2.mcp, colour = "50-150ms prior"), method = "lm", se = FALSE, fullrange = TRUE, linewidth = line.width) + 
+  geom_point(data = df2, aes(x = session1.mcp, y = session2.mcp, colour = "0-200ms prior"), size = point.size, alpha = point.alpha) + 
+  geom_smooth(data = df2, aes(x = session1.mcp, y = session2.mcp, colour = "0-200ms prior"), method = "lm", se = FALSE, fullrange = TRUE, linewidth = line.width) + 
+  labs(x = "Session 1 Onset (ms)", y = "Session 2 Onset (ms)", colour = "Method") +
+  xlim(xa, xb) + ylim(xa, xb) + 
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "#000000") +
+  ggtitle("Participant onset distribution across both sessions.") +
+  theme_gar +
+  theme(legend.position = "right", plot.title = element_text(size = 14)) +
+  coord_fixed(ratio = 1)
+
+prior.plot <- prior.plot + scale_color_manual(values = c(
+  "50-150ms prior" = "#009E73", 
+  "0-200ms prior"="#D55E00"
+))
+
+prior.plot
+```
+Bieniek MM, Bennett PJ, Sekuler AB, Rousselet GA (2016) A robust and representative lower bound on object processing speed in humans. The European Journal of Neuroscience, 44(2), 1804–1814. https://doi.org/10.1111/ejn.13100

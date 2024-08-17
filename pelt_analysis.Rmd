@@ -1,0 +1,1396 @@
+---
+output:
+  pdf_document:
+    fig_caption: no
+    number_sections: no
+    toc: yes
+    toc_depth: 2
+    # github_document:
+    # html_preview: yes
+    # toc: yes
+    # toc_depth: 2
+---
+
+Below is a more detailed analysis of the different penalty multiplier values that have been used to control the sensitivity of the PELT algorithm. 
+
+# Dependencies
+```{r setup, message=FALSE}
+library(ggplot2)
+library(dplyr)
+library(tibble)
+library(cowplot)
+library(beepr)
+library(Rfast)
+library(changepoint)
+library(mcp)
+library(rjags)
+source("./code/functions.R")
+source("./code/theme_gar.txt")
+# Edit `one_over_f` function from `primer` package to control variance (Stevens, 2009). 
+# Original function is available on [GitHub](https://github.com/HankStevens/primer).
+# Copyright Hank Stevens.
+source("./code/one_over_f.R")
+# Load template: true onset = 160 ms, F=81, max at F=126
+source("./code/erp_template.R")
+# R version of Matlab code from Yeung et al. 2004
+source("./code/eeg_noise.R")
+# Lodaing the code that gives median instead of mean values in mcp summary table
+source("./code/mcp_median_function.R")
+# to use with eeg_noise function
+meanpower <- unlist(read.table("./code/meanpower.txt"))
+```
+
+## Changepoint PELT integration
+After looking at the EnvCpt package and identifying trendcptAR2 as being the most optimal algorithm for change point detection, I decided to move away from that package for the following reasons:
+
+1. When I looked at the output object of that package, specifically the trendcptAR2 segment, I found that it was calculated using the PELT algorithm, the same PELT algorithm that is used in the changepoint package. 
+2. When I attempted to set the number of change points detected by EnvCpt to 1, it became apparent that there are no parameters in that package that let you do that. Additionally, I found that there are very few editable parameters in that package in general, meaning it was hard to narrow down the location of change point.
+3. Because of the lack of control of the parameters that could be used to narrow down the change point location, I kept getting outputs with around 10 different change point values every time I ran the EnvCpt algorithm, which I did not think was useful when we are only looking for 1 change point. 
+4. Finally, when running the EnvCpt algorithm, it always runs the data through the 12 models that are in the package, even when you specify that you are only requiring 1 algorithm. This is computationally inefficient in my opinion.
+
+Therefore, I chose instead to test the PELT algorithm that is in the changepoint package since it is the same algorithm as in the trendcptAR2 approach, except this package appears to have parameters built in that can be changed to narrow down the location of the change point. 
+
+The parameter that ended up being the most useful when narrowing down change point location was found to be penalty = "Manual", pen.value = x*log(length(ori.t2)). This is a penalty setting that can be applied to the algorithm, which essentially controls the trade-off between fitting the data closely (having many change points) and keeping the model simpler (having fewer change points). A higher penalty discourages the algorithm from identifying multiple change points unless they significantly improve the model fit. 
+
+The formula for the penalty calculation used in the changepoint package is penalty = kxlog(n) where k is the penalty multiplier and n is the number of observations in the time series. log(n) provides a logarithmic scale to the penalty which grows with the data but not linearly. 
+
+After applying the penalty value, I found that it had a significant impact on the change point locations that the algorithm gave me. Below I tested this by using penalty multipliers of 5, 10, 15 and 20. I recorded the mean change point value (since I ran every test 10 times) given by the algorithm along with the SD as some penalty values caused the algorithm to detect change points extremely early or extremely late in the time series. 
+
+```{r}
+
+# Here I tried different penalty multiplier values (5, 10, 15, 20) to see what impact changing the value has on the estimated change point 
+
+set.seed(666)
+srate <- 500 # Sampling rate in Hz
+nsim <- 10
+Nt <- 50 # number of trials
+outvar <- 2 # noise variance
+cond1 <- matrix(0, nrow = Nt, ncol = Nf) 
+cond2 <- matrix(0, nrow = Nt, ncol = Nf)
+
+
+pt.res <- list()
+
+for (i in 1:10){
+  for(T in 1:Nt){
+  cond2[T,] <- temp2 + eeg_noise(frames = Nf, srate = srate, outvar = outvar, meanpower)
+  cond1[T,] <- temp1 + eeg_noise(frames = Nf, srate = srate, outvar = outvar, meanpower)
+  }
+
+  ori.t2 <- vector(mode = "numeric", length = Nf)
+  
+  for(F in 1:Nf){
+  ori.t2[F] <- t.test(cond1[,F], cond2[,F])$statistic^2
+  }
+  
+  pts <- cpt.meanvar(ori.t2, method = "PELT", penalty = "Manual", pen.value = 5*log(length(ori.t2)))
+  pt <- Xf[pts@cpts[1]]
+  pt.res[[i]] <- pt
+}
+# pt.res
+
+var1 <- sd(unlist(pt.res), na.rm=T)
+var11 <- mean(unlist(pt.res), na.rm=T)
+var1
+var11
+
+
+
+pt.res1 <- list()
+
+for (i in 1:10){
+  for(T in 1:Nt){
+  cond2[T,] <- temp2 + eeg_noise(frames = Nf, srate = srate, outvar = outvar, meanpower)
+  cond1[T,] <- temp1 + eeg_noise(frames = Nf, srate = srate, outvar = outvar, meanpower)
+  }
+
+  ori.t2 <- vector(mode = "numeric", length = Nf)
+  
+  for(F in 1:Nf){
+  ori.t2[F] <- t.test(cond1[,F], cond2[,F])$statistic^2
+  }
+  
+  pts1 <- cpt.meanvar(ori.t2, method = "PELT", penalty = "Manual", pen.value = 10*log(length(ori.t2)))
+  point.cpts1 <- Xf[pts1@cpts[1]]
+  pt.res1[[i]] <- point.cpts1
+}
+# pt.res1
+var2 <- sd(unlist(pt.res1), na.rm=T)
+var22 <- mean(unlist(pt.res1), na.rm=T)
+var2 
+var22
+
+
+
+pt.res1 <- list()
+
+for (i in 1:10){
+  for(T in 1:Nt){
+  cond2[T,] <- temp2 + eeg_noise(frames = Nf, srate = srate, outvar = outvar, meanpower)
+  cond1[T,] <- temp1 + eeg_noise(frames = Nf, srate = srate, outvar = outvar, meanpower)
+  }
+
+  ori.t2 <- vector(mode = "numeric", length = Nf)
+  
+  for(F in 1:Nf){
+  ori.t2[F] <- t.test(cond1[,F], cond2[,F])$statistic^2
+  }
+  
+  pts1 <- cpt.meanvar(ori.t2, method = "PELT", penalty = "Manual", pen.value = 15*log(length(ori.t2)))
+  point.cpts1 <- Xf[pts1@cpts[1]]
+  pt.res1[[i]] <- point.cpts1
+}
+
+var3 <- sd(unlist(pt.res1), na.rm=T)
+var33 <- mean(unlist(pt.res1), na.rm=T)
+var3
+var33
+
+
+
+pt.res1 <- list()
+
+for (i in 1:10){
+  for(T in 1:Nt){
+  cond2[T,] <- temp2 + eeg_noise(frames = Nf, srate = srate, outvar = outvar, meanpower)
+  cond1[T,] <- temp1 + eeg_noise(frames = Nf, srate = srate, outvar = outvar, meanpower)
+  }
+
+  ori.t2 <- vector(mode = "numeric", length = Nf)
+  
+  for(F in 1:Nf){
+  ori.t2[F] <- t.test(cond1[,F], cond2[,F])$statistic^2
+  }
+  
+  pts1 <- cpt.meanvar(ori.t2, method = "PELT", penalty = "Manual", pen.value = 20*log(length(ori.t2)))
+  point.cpts1 <- Xf[pts1@cpts[1]]
+  pt.res1[[i]] <- point.cpts1
+}
+
+var4 <- sd(unlist(pt.res1), na.rm=T)
+var44 <- mean(unlist(pt.res1), na.rm=T)
+var4
+var44
+```
+
+
+After finding how impactful the multiplier was, I decided its best to compare multiplier values from 0 to 30 to check how they affect the algorithm's ability to detect change points. Here I created a loop that does the following (same principle as the one used above) for every penalty multiplier from 0 to 30:
+1. Creates an empty list of results.
+2. Runs a simulation loop where 2 conditions are compared using t tests (effect and no effect conditions). This is stored in ori.t2 object. 
+3. The PELT algorithm is then applied with a multiplier value from 0 to 30.
+4. The resulting change point location that was identified is stored in a list. 
+5. The mean change point locations (as sometimes multiple locations were identified) and corresponding SD are stored in a list. 
+6. Mean and SD values are plotted against the log multiplier value. 
+
+This has helped me identify 15 as the ideal log multiplier value (though it can be argued that any multiplier value around 10-15 range is suitable), as that is where the change point mean location is around 160 ms (where the true onset is) and SD is low enough indicating that change points in extreme time locations are not being detected. Multiplier values below 10 were shown to consistently locate change points extremely early (<100ms, low mean, low SD), while values above 20 have caused the algorithm to identify change point locations very inconsistently (high SD). 
+```{r}
+
+# set.seed(66)
+srate <- 500 # Sampling rate in Hz
+nsim <- 10
+Nt <- 50 # number of trials
+outvar <- 2 # noise variance
+cond1 <- matrix(0, nrow = Nt, ncol = Nf) 
+cond2 <- matrix(0, nrow = Nt, ncol = Nf)
+options(mc.cores = 4)
+
+results <- data.frame(multiplier = integer(), mean = numeric(), sd = numeric(), median = numeric())
+
+for (multiplier in 0:30) {
+    pt.res <- list()
+
+    for (i in 1:nsim) {
+      
+      for(T in 1:Nt){
+        cond2[T,] <- temp2 + eeg_noise(frames = Nf, srate = srate, outvar = outvar, meanpower)
+        cond1[T,] <- temp1 + eeg_noise(frames = Nf, srate = srate, outvar = outvar, meanpower)
+      }
+      
+      ori.t2 <- vector(mode = "numeric", length = Nf)
+      
+      for(F in 1:Nf){
+        ori.t2[F] <- t.test(cond1[,F], cond2[,F])$statistic^2
+      }
+      
+      # Adjust penalty based on the multiplier
+      pts <- cpt.meanvar(ori.t2, method = "PELT", penalty = "Manual", pen.value = multiplier * log(length(ori.t2)))
+      if (length(pts@cpts) > 0) {
+        pt.res[[i]] <- Xf[pts@cpts[1]]
+        } else {
+          pt.res[[i]] <- NA  # Handle case where no change point is found
+        }
+      }
+
+    # Calculate statistics for this multiplier
+    current_mean <- mean(unlist(pt.res), na.rm = TRUE)
+    current_sd <- sd(unlist(pt.res), na.rm = TRUE)
+    current_median <- median(unlist(pt.res), na.rm = TRUE)
+
+    # Store results
+    results <- rbind(results, data.frame(multiplier = multiplier, mean = current_mean, sd = current_sd, median = current_median))
+}
+
+
+
+
+ggplot(data = results, aes(x = multiplier)) +
+  geom_line(aes(y = mean, color = "Mean"), size = 1) +
+  geom_point(aes(y = mean, color = "Mean"), size = 2) +
+  geom_line(aes(y = sd, color = "SD"), size = 1) +
+  geom_point(aes(y = sd, color = "SD"), size = 2) +
+  geom_line(aes(y = median, color = "Median"), size = 1) +
+  geom_point(aes(y = median, color = "Median"), size = 2) +
+  scale_color_manual(values = c("Mean" = "dodgerblue", "SD" = "red4", "Median" = "green4")) +
+  labs(title = "Change Point Analysis: Mean, SD, and Median",
+       x = "Log Multiplier", y = "Value") +
+  theme_minimal() +
+  theme(legend.title = element_blank(), legend.position = "top")
+
+ggplot(results, aes(x = multiplier)) +
+  geom_point(aes(y = mean), color = "dodgerblue") +
+  geom_line(aes(y = mean), color = "dodgerblue") +
+  labs(title = "Mean Change Point Locations vs. Log Multiplier", x = "Log Multiplier", y = "Mean Location")
+
+ggplot(results, aes(x = multiplier)) +
+  geom_point(aes(y = sd), color = "red4") +
+  geom_line(aes(y = sd), color = "red4") +
+  labs(title = "Standard Deviation of Change Point Locations vs. Log Multiplier", x = "Log Multiplier", y = "Standard Deviation")
+
+ggplot(results, aes(x = multiplier)) +
+  geom_point(aes(y = median), color = "green4") +
+  geom_line(aes(y = median), color = "green4") +
+  labs(title = "Median of Change Point Locations vs. Log Multiplier", x = "Log Multiplier", y = "Median Location")
+```
+
+This is the same as above but with 500 simulations instead of 10.
+```{r}
+
+# set.seed(66)
+srate <- 500 # Sampling rate in Hz
+nsim <- 500
+Nt <- 50 # number of trials
+outvar <- 2 # noise variance
+cond1 <- matrix(0, nrow = Nt, ncol = Nf) 
+cond2 <- matrix(0, nrow = Nt, ncol = Nf)
+options(mc.cores = 4)
+
+results <- data.frame(multiplier = integer(), mean = numeric(), sd = numeric(), median = numeric())
+
+for (multiplier in 0:30) {
+    pt.res <- list()
+
+    for (i in 1:nsim) {
+      
+      for(T in 1:Nt){
+        cond2[T,] <- temp2 + eeg_noise(frames = Nf, srate = srate, outvar = outvar, meanpower)
+        cond1[T,] <- temp1 + eeg_noise(frames = Nf, srate = srate, outvar = outvar, meanpower)
+      }
+      
+      ori.t2 <- vector(mode = "numeric", length = Nf)
+      
+      for(F in 1:Nf){
+        ori.t2[F] <- t.test(cond1[,F], cond2[,F])$statistic^2
+      }
+      
+      # Adjust penalty based on the multiplier
+      pts <- cpt.meanvar(ori.t2, method = "PELT", penalty = "Manual", pen.value = multiplier * log(length(ori.t2)))
+      if (length(pts@cpts) > 0) {
+        pt.res[[i]] <- Xf[pts@cpts[1]]
+        } else {
+          pt.res[[i]] <- NA  # Handle case where no change point is found
+        }
+      }
+
+    # Calculate statistics for this multiplier
+    current_mean <- mean(unlist(pt.res), na.rm = TRUE)
+    current_sd <- sd(unlist(pt.res), na.rm = TRUE)
+    current_median <- median(unlist(pt.res), na.rm = TRUE)
+
+    # Store results
+    results <- rbind(results, data.frame(multiplier = multiplier, mean = current_mean, sd = current_sd, median = current_median))
+}
+
+
+
+
+ggplot(data = results, aes(x = multiplier)) +
+  geom_line(aes(y = mean, color = "Mean"), size = 1) +
+  geom_point(aes(y = mean, color = "Mean"), size = 2) +
+  geom_line(aes(y = sd, color = "SD"), size = 1) +
+  geom_point(aes(y = sd, color = "SD"), size = 2) +
+  geom_line(aes(y = median, color = "Median"), size = 1) +
+  geom_point(aes(y = median, color = "Median"), size = 2) +
+  scale_color_manual(values = c("Mean" = "dodgerblue", "SD" = "red4", "Median" = "green4")) +
+  labs(title = "Change Point Analysis: Mean, SD, and Median",
+       x = "Log Multiplier", y = "Value") +
+  theme_minimal() +
+  theme(legend.title = element_blank(), legend.position = "top")
+
+ggplot(results, aes(x = multiplier)) +
+  geom_point(aes(y = mean), color = "dodgerblue") +
+  geom_line(aes(y = mean), color = "dodgerblue") +
+  labs(title = "Mean Change Point Locations vs. Log Multiplier", x = "Log Multiplier", y = "Mean Location")
+
+ggplot(results, aes(x = multiplier)) +
+  geom_point(aes(y = sd), color = "red4") +
+  geom_line(aes(y = sd), color = "red4") +
+  labs(title = "Standard Deviation of Change Point Locations vs. Log Multiplier", x = "Log Multiplier", y = "Standard Deviation")
+
+ggplot(results, aes(x = multiplier)) +
+  geom_point(aes(y = median), color = "green4") +
+  geom_line(aes(y = median), color = "green4") +
+  labs(title = "Median of Change Point Locations vs. Log Multiplier", x = "Log Multiplier", y = "Median Location")
+```
+
+
+Code below is the same as that above except a new clause has been added that ensures that only change points between 100 and 200 ms are saved. This is similar to the function of the prior between 100 and 200 ms like the one used in the mcp package implementation. This results in a much lower SD as values outwith the mentioned limits are not not collected, however, it also means that in some iterations no change point values are collected. Not sure which approach is best. 
+```{r}
+
+# set.seed(66)
+srate <- 500 # Sampling rate in Hz
+nsim <- 10
+Nt <- 50 # number of trials
+outvar <- 2 # noise variance
+cond1 <- matrix(0, nrow = Nt, ncol = Nf) 
+cond2 <- matrix(0, nrow = Nt, ncol = Nf)
+
+results <- data.frame(multiplier = integer(), mean = numeric(), sd = numeric())
+
+for (multiplier in 0:30) {
+    pt.res <- list()
+
+    for (i in 1:nsim) {
+      
+      for(T in 1:Nt){
+        cond2[T,] <- temp2 + eeg_noise(frames = Nf, srate = srate, outvar = outvar, meanpower)
+        cond1[T,] <- temp1 + eeg_noise(frames = Nf, srate = srate, outvar = outvar, meanpower)
+      }
+      
+      ori.t2 <- vector(mode = "numeric", length = Nf)
+      
+      for(F in 1:Nf){
+        ori.t2[F] <- t.test(cond1[,F], cond2[,F])$statistic^2
+      }
+      
+      # Adjust penalty based on the multiplier
+      pts <- cpt.meanvar(ori.t2, method = "PELT", penalty = "Manual", pen.value = multiplier * log(length(ori.t2)))
+      if (length(pts@cpts) > 0) {
+        point <- Xf[pts@cpts[1]]
+        pt.res[[i]] <- point[point > 100 & point < 200]
+        } else {
+          pt.res[[i]] <- NA  # Handle case where no change point is found
+        }
+      }
+
+    # Calculate statistics for this multiplier
+    current_mean <- mean(unlist(pt.res), na.rm = TRUE)
+    current_sd <- sd(unlist(pt.res), na.rm = TRUE)
+
+    # Store results
+    results <- rbind(results, data.frame(multiplier = multiplier, mean = current_mean, sd = current_sd))
+}
+
+
+
+
+ggplot(data = results, aes(x = multiplier)) +
+  geom_line(aes(y = mean, color = "Mean"), size = 1) +  # Line for mean
+  geom_point(aes(y = mean, color = "Mean"), size = 2) +
+  geom_line(aes(y = sd, color = "SD"), size = 1) +  # Line for standard deviation
+  geom_point(aes(y = sd, color = "SD"), size = 2) +
+  scale_color_manual(values = c("Mean" = "dodgerblue", "SD" = "red4")) +
+  labs(title = "Change Point Analysis: Mean and Standard Deviation",
+       x = "Log Multiplier", y = "Mean Location") +
+  scale_y_continuous(name = "Mean Location", sec.axis = sec_axis(~ ., name = "Standard Deviation")) +
+  theme_gar +
+  theme(legend.title = element_blank(), legend.position = "top")
+```
+
+
+
+## PELT test
+Here I applied the PELT method with the penalty multiplier of 15 to the EEG time course data. 
+```{r}
+set.seed(666)
+srate <- 500 # Sampling rate in Hz
+Nt <- 50 # number of trials
+outvar <- 1 # noise variance
+cond1 <- matrix(0, nrow = Nt, ncol = Nf) 
+cond2 <- matrix(0, nrow = Nt, ncol = Nf)
+
+for(T in 1:Nt){
+  cond2[T,] <- temp2 + eeg_noise(frames = Nf, srate = srate, outvar = outvar, meanpower)
+  cond1[T,] <- temp1 + eeg_noise(frames = Nf, srate = srate, outvar = outvar, meanpower)
+}
+
+ori.t2 <- vector(mode = "numeric", length = Nf)
+
+for(F in 1:Nf){
+  ori.t2[F] <- t.test(cond1[,F], cond2[,F])$statistic^2
+}
+
+
+res <- cpt.meanvar(ori.t2, method = "PELT", penalty = "Manual", pen.value = 15*log(length(ori.t2)))
+
+df <- tibble(x = Xf,
+             y = ori.t2)
+
+p.cp <- ggplot(df, aes(x, y)) + theme_gar + 
+  geom_line(linewidth = 1) +
+  geom_vline(xintercept = true_onset) +
+  geom_vline(xintercept = Xf[res@cpts[1]], linetype = "dotted") +
+  labs(x = "Time in ms", y = bquote(t^2)) +
+  ggtitle(paste("Change point onset =", Xf[res@cpts[1]], "ms"))
+p.cp
+
+plot(res, cpt.width = 4)
+cpts(res)
+```
+
+For comparison, here is the same code but with the default penalty. The default penalty causes the algorithm to pick up a lot more change points. 
+```{r}
+set.seed(666)
+srate <- 500 # Sampling rate in Hz
+Nt <- 50 # number of trials
+outvar <- 1 # noise variance
+cond1 <- matrix(0, nrow = Nt, ncol = Nf) 
+cond2 <- matrix(0, nrow = Nt, ncol = Nf)
+
+for(T in 1:Nt){
+  cond2[T,] <- temp2 + eeg_noise(frames = Nf, srate = srate, outvar = outvar, meanpower)
+  cond1[T,] <- temp1 + eeg_noise(frames = Nf, srate = srate, outvar = outvar, meanpower)
+}
+
+ori.t2 <- vector(mode = "numeric", length = Nf)
+
+for(F in 1:Nf){
+  ori.t2[F] <- t.test(cond1[,F], cond2[,F])$statistic^2
+}
+
+
+res <- cpt.meanvar(ori.t2, method = "PELT")
+
+plot(res, cpt.width = 4)
+cpts(res)
+```
+
+Now the same approach will be extended to a simulation which will be run 100 times
+```{r, eval=FALSE, warning=FALSE}
+
+aath <- 0.05 # arbitrary alpha threshold
+nsim <- 100 # simulation iterations
+nboot <- 2000 # number of permutation samples
+inc.step <- 500 # console notification every inc.step iterations
+simres.cp  <- vector(mode = "numeric", length = nsim) * NA
+
+Nt <- 50 # number of trials
+gsp <- 1 # gamma spectral power
+outvar <- 1 # noise variance
+cond1 <- matrix(0, nrow = Nt, ncol = Nf)
+cond2 <- matrix(0, nrow = Nt, ncol = Nf)
+
+for(S in 1:nsim){
+  
+  sim.counter(S, nsim, inc = inc.step)
+  
+  for(T in 1:Nt){
+    cond2[T,] <- temp2 + one_over_f(gamma = gsp, Nf, outvar = outvar)
+    cond1[T,] <- temp1 + one_over_f(gamma = gsp, Nf, outvar = outvar)  
+  }
+  # t-tests
+  ori.t2 <- vector(mode = "numeric", length = Nf)
+  for(F in 1:Nf){
+    ori.t2[F] <- t.test(cond1[,F], cond2[,F])$statistic^2
+  }
+  
+  res <- cpt.meanvar(ori.t2, method = "PELT", penalty = "Manual", pen.value = 15*log(length(ori.t2)))
+  simres.cp[S] <- Xf[res@cpts[1]]
+}
+
+# save(simres.cp, file = "./data/onsetsim_n50_cp_PELT.RData")
+```
+
+## Plot onset distributions
+
+Plotting the distributions, it is evident that a lot of the onsets are being estimated between the true onset and 200ms, while another significant chunk of them are being estimated around the 100ms mark. Therefore I propose that limits of 100 and 200ms are imposed to remove outlying estimates. 
+```{r, warning=FALSE, fig.height=6, fig.width=8}
+load("./data/onsetsim_n50_cp_PELT.RData")
+
+# Colour palette from http://www.cookbook-r.com/Graphs/Colors_(ggplot2)/
+categ.palette <- c("#000000", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+
+df <- tibble(onsets = c(simres.cp),
+             method = factor(rep("change point", length(simres.cp)))
+)
+
+ggplot(data = df, aes(x = onsets, colour = method)) + theme_gar +
+  # stat_density(geom = "line") +
+  geom_freqpoly(fill = "white", na.rm = TRUE, breaks = Xf) +
+  geom_vline(xintercept = true_onset, linetype = "dashed") +
+  # geom_vline(xintercept = median(simres.cp, na.rm = TRUE))
+  scale_colour_manual(values = categ.palette) +
+  theme(legend.position = c(.8, .8)) +
+  labs(x = "Onsets in ms", y = "Count")
+```
+
+### Plotting distribution of penalty multiplier values from 0 to 30
+The onset distributions of different penalty values can be compared. Below is a plot of simulated onset distribution for every multiplier value between 1(no multiplier) and 30. 
+```{r}
+aath <- 0.05 # arbitrary alpha threshold
+nsim <- 500 # simulation iterations
+nboot <- 2000 # number of permutation samples
+
+Nt <- 50 # number of trials
+gsp <- 1 # gamma spectral power
+outvar <- 1 # noise variance
+penalty_multipliers <- 1:30
+options(mc.cores = 8)
+
+simres_list <- vector("list", length(penalty_multipliers))
+names(simres_list) <- paste0("simres.cp", penalty_multipliers)
+
+for (multiplier in penalty_multipliers) {
+  simres <- vector(mode = "numeric", length = nsim) * NA
+  
+  for (S in 1:nsim) {
+    
+    for (T in 1:Nt) {
+      cond2[T,] <- temp2 + one_over_f(gamma = gsp, Nf, outvar = outvar)
+      cond1[T,] <- temp1 + one_over_f(gamma = gsp, Nf, outvar = outvar)  
+    }
+    # t-tests
+    ori.t2 <- vector(mode = "numeric", length = Nf)
+    for (F in 1:Nf) {
+      ori.t2[F] <- t.test(cond1[,F], cond2[,F])$statistic^2
+    }
+    
+    res <- cpt.meanvar(ori.t2, method = "PELT", penalty = "Manual", pen.value = multiplier * log(length(ori.t2)))
+    if (length(res@cpts) > 0) {
+      simres[S] <- Xf[res@cpts[1]]
+    } else {
+      simres[S] <- NA
+    }
+  }
+  
+  simres_list[[paste0("simres.cp", multiplier)]] <- simres
+}
+
+# Optionally, save results to a file
+save(simres_list, file = "./data/simres_list_penalty_comparison.RData")
+```
+
+```{r, fig.height=25, fig.width=25}
+
+load(file = "./data/simres_list_penalty_comparison.RData")
+
+df <- tibble(
+  onsets = c(simres_list$simres.cp1,
+             simres_list$simres.cp2,
+             simres_list$simres.cp3,
+             simres_list$simres.cp4,
+             simres_list$simres.cp5,
+             simres_list$simres.cp6,
+             simres_list$simres.cp7,
+             simres_list$simres.cp8,
+             simres_list$simres.cp9,
+             simres_list$simres.cp10,
+             simres_list$simres.cp11,
+             simres_list$simres.cp12,
+             simres_list$simres.cp13,
+             simres_list$simres.cp14,
+             simres_list$simres.cp15,
+             simres_list$simres.cp16,
+             simres_list$simres.cp17,
+             simres_list$simres.cp18,
+             simres_list$simres.cp19,
+             simres_list$simres.cp20,
+             simres_list$simres.cp21,
+             simres_list$simres.cp22,
+             simres_list$simres.cp23,
+             simres_list$simres.cp24,
+             simres_list$simres.cp25,
+             simres_list$simres.cp26,
+             simres_list$simres.cp27,
+             simres_list$simres.cp28,
+             simres_list$simres.cp29,
+             simres_list$simres.cp30),
+  multiplier = factor(rep(1:30, each = length(simres_list$simres.cp1)))
+)
+
+# Colour palette for six categories
+categ.palette <- viridis::viridis(30)
+
+
+ggplot(data = df, aes(x = onsets, colour = multiplier)) + theme_gar +
+  geom_freqpoly(binwidth = 2, fill = "white", na.rm = TRUE) +
+  geom_vline(xintercept = true_onset, linetype = "dashed") +
+  scale_colour_manual(values = categ.palette) +
+  theme(legend.position = c(.8, .8)) +
+  labs(x = "Onsets in ms", y = "Count", colour = "Penalty Multiplier")
+
+```
+
+It is hard to distinguish specific lines from each other in the graph above. Therefore the graph below is designed to plot lines corresponding to specific multiplier values in order for them to be compared clearly side by side. To compare enter the desired multiplier values in the c(). 
+```{r, fig.height=6, fig.width=8}
+
+
+df_filter <- df |> 
+  filter(multiplier %in% c(2,15))
+
+categ.palette <- viridis::inferno(n_distinct(df_filter$multiplier))
+
+ggplot(data = df_filter, aes(x = onsets, colour = multiplier)) + theme_gar +
+  geom_freqpoly(binwidth = 2, fill = "white", na.rm = TRUE) +
+  geom_vline(xintercept = true_onset, linetype = "dashed") +
+  scale_colour_manual(values = categ.palette) +
+  theme(legend.position = c(.8, .8)) +
+  labs(x = "Onsets in ms", y = "Count", colour = "Penalty Multiplier")
+```
+
+
+### Comparing time course segmentation approaches
+
+The PELT algorithm can be limited to only identify change points within the window of 100-200ms. This works similar to a prior that is used in the Bayesian mcp package, therefore it could be argued that narrowing down the time window of interest actually makes it a more fair comparison against mcp.
+
+Theoretically, there are two approaches to achieve this: the first is to allow the algorithm to identify all possible change point locations but limit the simulation loop to only store onsets estimates that fall between 100 and 200ms. All estimates that fall outside of this range are not saved. The other approach is to create a time window between 100 and 200ms and make the algorithm look for change points within that window. The caveat with the second approach is that it may influence how the algorithm detects change points as it will limit the amount of information that it can use in its calculation for segmenting data based on mean and variance. In particular, change point locations closer to the 100 and 200ms limits are more likely to be affected. If this effect is found to be true, then limits could be expanded (for example to a window encompassing area between 50 and 250ms). 
+
+Here, the first task is to see what the onset distribution looks like when only sampling onset values between 100 and 200ms. 
+
+```{r, warning=FALSE}
+
+set.seed(666)
+aath <- 0.05 # arbitrary alpha threshold
+nsim <- 1000 # simulation iterations
+nboot <- 2000 
+Nt <- 50 # number of trials
+gsp <- 1 # gamma spectral power
+outvar <- 1 # noise variance
+cond1 <- matrix(0, nrow = Nt, ncol = Nf)
+cond2 <- matrix(0, nrow = Nt, ncol = Nf)
+
+penalty_multipliers <- 1:30
+
+simres_list <- vector("list", length(penalty_multipliers))
+names(simres_list) <- paste0("simres.cp", penalty_multipliers)
+
+for (multiplier in penalty_multipliers) {
+    res <- vector(mode = "numeric", length = nsim) * NA
+    cond1 <- matrix(0, nrow = Nt, ncol = Nf)
+    cond2 <- matrix(0, nrow = Nt, ncol = Nf)
+
+    for (i in 1:nsim) {
+        for (T in 1:Nt) {
+            cond2[T, ] <- temp2 + eeg_noise(frames = Nf, srate = srate, outvar = outvar, meanpower)
+            cond1[T, ] <- temp1 + eeg_noise(frames = Nf, srate = srate, outvar = outvar, meanpower)
+        }
+
+        ori.t2 <- vector(mode = "numeric", length = Nf)
+        for (F in 1:Nf) {
+            ori.t2[F] <- t.test(cond1[, F], cond2[, F])$statistic^2
+        }
+
+        pts <- cpt.meanvar(ori.t2, method = "PELT", penalty = "Manual", pen.value = multiplier * log(length(ori.t2)))
+        if (length(pts@cpts) > 0) {
+            point <- Xf[pts@cpts[1]]
+            filtered_points <- point[point > 100 & point < 200]
+            res[i] <- if (length(filtered_points) > 0) filtered_points[1] else NA
+        } else {
+            res[i] <- NA
+        }
+    }
+    simres_list[[paste0("simres.cp", multiplier)]] <- res
+}
+
+save(simres_list, file = "./data/simres_list_penalty_comparison_100ms_window.RData")
+
+```
+
+```{r warning=FALSE, fig.height=25, fig.width=25}
+
+load(file = "./data/simres_list_penalty_comparison_100ms_window.RData")
+
+df <- tibble(
+  onsets = c(simres_list$simres.cp1,
+             simres_list$simres.cp2,
+             simres_list$simres.cp3,
+             simres_list$simres.cp4,
+             simres_list$simres.cp5,
+             simres_list$simres.cp6,
+             simres_list$simres.cp7,
+             simres_list$simres.cp8,
+             simres_list$simres.cp9,
+             simres_list$simres.cp10,
+             simres_list$simres.cp11,
+             simres_list$simres.cp12,
+             simres_list$simres.cp13,
+             simres_list$simres.cp14,
+             simres_list$simres.cp15,
+             simres_list$simres.cp16,
+             simres_list$simres.cp17,
+             simres_list$simres.cp18,
+             simres_list$simres.cp19,
+             simres_list$simres.cp20,
+             simres_list$simres.cp21,
+             simres_list$simres.cp22,
+             simres_list$simres.cp23,
+             simres_list$simres.cp24,
+             simres_list$simres.cp25,
+             simres_list$simres.cp26,
+             simres_list$simres.cp27,
+             simres_list$simres.cp28,
+             simres_list$simres.cp29,
+             simres_list$simres.cp30),
+  multiplier = factor(rep(1:30, each = length(simres_list$simres.cp1)))
+)
+
+# Colour palette for six categories
+categ.palette <- viridis::viridis(30)
+
+
+ggplot(data = df, aes(x = onsets, colour = multiplier)) + theme_gar +
+  geom_freqpoly(binwidth = 2, fill = "white", na.rm = TRUE) +
+  geom_vline(xintercept = true_onset, linetype = "dashed") +
+  scale_colour_manual(values = categ.palette) +
+  theme(legend.position = c(.8, .8)) +
+  xlim(0, 500) +
+  labs(x = "Onsets in ms", y = "Count", colour = "Penalty Multiplier")
+
+```
+
+```{r, fig.height=6, fig.width=8}
+
+
+df_filter <- df |> 
+  filter(multiplier %in% c(10,15,20,30))
+
+categ.palette <- viridis::viridis(n_distinct(df_filter$multiplier))
+
+ggplot(data = df_filter, aes(x = onsets, colour = multiplier)) + theme_gar +
+  geom_freqpoly(binwidth = 2, fill = "white", na.rm = TRUE) +
+  geom_vline(xintercept = true_onset, linetype = "dashed") +
+  scale_colour_manual(values = categ.palette) +
+  theme(legend.position = c(.8, .8)) +
+  xlim(50, 300)
+  labs(x = "Onsets in ms", y = "Count", colour = "Penalty Multiplier")
+```
+
+The previous segment looks into what the results look like if the simulation only saves change points between 100 and 200ms. The code below will look at how this data changes if instead of simply not saving values falling outside the 100-200ms range, the algorithm instead only looks at the time course segment between 100 and 200ms. 
+
+```{r, warning=FALSE}
+
+set.seed(666)
+aath <- 0.05 # arbitrary alpha threshold
+nsim <- 1000 # simulation iterations
+nboot <- 2000 
+Nt <- 50 # number of trials
+gsp <- 1 # gamma spectral power
+outvar <- 1 # noise variance
+cond1 <- matrix(0, nrow = Nt, ncol = Nf)
+cond2 <- matrix(0, nrow = Nt, ncol = Nf)
+
+penalty_multipliers <- 1:30
+
+simres_list <- vector("list", length(penalty_multipliers))
+names(simres_list) <- paste0("simres.cp", penalty_multipliers)
+
+for (multiplier in penalty_multipliers) {
+    res <- vector(mode = "numeric", length = nsim) * NA
+    cond1 <- matrix(0, nrow = Nt, ncol = Nf)
+    cond2 <- matrix(0, nrow = Nt, ncol = Nf)
+
+    for (i in 1:nsim) {
+        for (T in 1:Nt) {
+            cond2[T, ] <- temp2 + eeg_noise(frames = Nf, srate = srate, outvar = outvar, meanpower)
+            cond1[T, ] <- temp1 + eeg_noise(frames = Nf, srate = srate, outvar = outvar, meanpower)
+        }
+
+        ori.t2 <- vector(mode = "numeric", length = Nf)
+        for (F in 1:Nf) {
+            ori.t2[F] <- t.test(cond1[, F], cond2[, F])$statistic^2
+        }
+        ########################################################################################
+        # Changed code 
+        time.window <- which(Xf >= 100 & Xf <= 200) # Create a subset of 100-200ms indices
+        filtered.ori.t2 <- ori.t2[time.window] # 
+        filtered.Xf <- Xf[time.window]
+        
+        pts <- cpt.meanvar(filtered.ori.t2, 
+                           method = "PELT", penalty = "Manual", pen.value = multiplier *  log(length(filtered.ori.t2)))
+        
+        if (length(pts@cpts) > 0){
+          res[i] <- filtered.Xf[pts@cpts[1]]
+        } else {
+          res[i] <- NA
+        }
+        #########################################################################################
+    }
+    
+    simres_list[[paste0("simres.cp", multiplier)]] <- res
+}
+
+save(simres_list, file = "./data/simres_list_penalty_comparison_100ms_window2.RData")
+
+```
+
+```{r, fig.height=25, fig.width=25}
+
+load(file = "./data/simres_list_penalty_comparison_100ms_window2.RData")
+
+df <- tibble(
+  onsets = c(simres_list$simres.cp1,
+             simres_list$simres.cp2,
+             simres_list$simres.cp3,
+             simres_list$simres.cp4,
+             simres_list$simres.cp5,
+             simres_list$simres.cp6,
+             simres_list$simres.cp7,
+             simres_list$simres.cp8,
+             simres_list$simres.cp9,
+             simres_list$simres.cp10,
+             simres_list$simres.cp11,
+             simres_list$simres.cp12,
+             simres_list$simres.cp13,
+             simres_list$simres.cp14,
+             simres_list$simres.cp15,
+             simres_list$simres.cp16,
+             simres_list$simres.cp17,
+             simres_list$simres.cp18,
+             simres_list$simres.cp19,
+             simres_list$simres.cp20,
+             simres_list$simres.cp21,
+             simres_list$simres.cp22,
+             simres_list$simres.cp23,
+             simres_list$simres.cp24,
+             simres_list$simres.cp25,
+             simres_list$simres.cp26,
+             simres_list$simres.cp27,
+             simres_list$simres.cp28,
+             simres_list$simres.cp29,
+             simres_list$simres.cp30),
+  multiplier = factor(rep(1:30, each = length(simres_list$simres.cp1)))
+)
+
+# Colour palette for six categories
+categ.palette <- viridis::viridis(30)
+
+
+ggplot(data = df, aes(x = onsets, colour = multiplier)) + theme_gar +
+  geom_freqpoly(binwidth = 2, fill = "white", na.rm = TRUE) +
+  geom_vline(xintercept = true_onset, linetype = "dashed") +
+  scale_colour_manual(values = categ.palette) +
+  theme(legend.position = c(.8, .8)) +
+  xlim(0, 500) +
+  labs(x = "Onsets in ms", y = "Count", colour = "Penalty Multiplier")
+
+```
+
+```{r, fig.height=6, fig.width=8}
+
+
+df_filter <- df |> 
+  filter(multiplier %in% c(10,15,20))
+
+categ.palette <- viridis::viridis(n_distinct(df_filter$multiplier))
+
+
+ggplot(data = df_filter, aes(x = onsets, colour = multiplier)) + theme_gar +
+  geom_freqpoly(binwidth = 2, fill = "white", na.rm = TRUE) +
+  geom_vline(xintercept = true_onset, linetype = "dashed") +
+  scale_colour_manual(values = categ.palette) +
+  theme(legend.position = c(.8, .8)) +
+  xlim(50, 300)
+  labs(x = "Onsets in ms", y = "Count", colour = "Penalty Multiplier")
+```
+
+### Trying different Xf
+```{r, warning=FALSE}
+
+set.seed(666)
+aath <- 0.05 # arbitrary alpha threshold
+nsim <- 1000 # simulation iterations
+nboot <- 2000 
+Nt <- 50 # number of trials
+gsp <- 1 # gamma spectral power
+outvar <- 1 # noise variance
+cond1 <- matrix(0, nrow = Nt, ncol = Nf)
+cond2 <- matrix(0, nrow = Nt, ncol = Nf)
+Xf <- seq(100,200,2)
+
+penalty_multipliers <- 1:30
+
+simres_list <- vector("list", length(penalty_multipliers))
+names(simres_list) <- paste0("simres.cp", penalty_multipliers)
+
+for (multiplier in penalty_multipliers) {
+  simres <- vector(mode = "numeric", length = nsim) * NA
+  
+  for (S in 1:nsim) {
+    
+    for (T in 1:Nt) {
+      cond2[T,] <- temp2 + one_over_f(gamma = gsp, Nf, outvar = outvar)
+      cond1[T,] <- temp1 + one_over_f(gamma = gsp, Nf, outvar = outvar)  
+    }
+    # t-tests
+    ori.t2 <- vector(mode = "numeric", length = Nf)
+    for (F in 1:Nf) {
+      ori.t2[F] <- t.test(cond1[,F], cond2[,F])$statistic^2
+    }
+    
+    res <- cpt.meanvar(ori.t2, method = "PELT", penalty = "Manual", pen.value = multiplier * log(length(ori.t2)))
+    if (length(res@cpts) > 0) {
+      simres[S] <- Xf[res@cpts[1]]
+    } else {
+      simres[S] <- NA
+    }
+  }
+  
+  simres_list[[paste0("simres.cp", multiplier)]] <- simres
+}
+
+save(simres_list, file = "./data/simres_list_penalty_comparison_100ms_window3.RData")
+```
+
+```{r, fig.height=25, fig.width=25}
+
+load(file = "./data/simres_list_penalty_comparison_100ms_window3.RData")
+
+df <- tibble(
+  onsets = c(simres_list$simres.cp1,
+             simres_list$simres.cp2,
+             simres_list$simres.cp3,
+             simres_list$simres.cp4,
+             simres_list$simres.cp5,
+             simres_list$simres.cp6,
+             simres_list$simres.cp7,
+             simres_list$simres.cp8,
+             simres_list$simres.cp9,
+             simres_list$simres.cp10,
+             simres_list$simres.cp11,
+             simres_list$simres.cp12,
+             simres_list$simres.cp13,
+             simres_list$simres.cp14,
+             simres_list$simres.cp15,
+             simres_list$simres.cp16,
+             simres_list$simres.cp17,
+             simres_list$simres.cp18,
+             simres_list$simres.cp19,
+             simres_list$simres.cp20,
+             simres_list$simres.cp21,
+             simres_list$simres.cp22,
+             simres_list$simres.cp23,
+             simres_list$simres.cp24,
+             simres_list$simres.cp25,
+             simres_list$simres.cp26,
+             simres_list$simres.cp27,
+             simres_list$simres.cp28,
+             simres_list$simres.cp29,
+             simres_list$simres.cp30),
+  multiplier = factor(rep(1:30, each = length(simres_list$simres.cp1)))
+)
+
+# Colour palette for six categories
+categ.palette <- viridis::viridis(30)
+
+
+ggplot(data = df, aes(x = onsets, colour = multiplier)) + theme_gar +
+  geom_freqpoly(binwidth = 2, fill = "white", na.rm = TRUE) +
+  geom_vline(xintercept = true_onset, linetype = "dashed") +
+  scale_colour_manual(values = categ.palette) +
+  theme(legend.position = c(.8, .8)) +
+  xlim(0, 500) +
+  labs(x = "Onsets in ms", y = "Count", colour = "Penalty Multiplier")
+
+```
+
+```{r, fig.height=6, fig.width=8}
+
+
+df_filter <- df |> 
+  filter(multiplier %in% c(10,15,20))
+
+categ.palette <- viridis::viridis(n_distinct(df_filter$multiplier))
+
+
+ggplot(data = df_filter, aes(x = onsets, colour = multiplier)) + theme_gar +
+  geom_freqpoly(binwidth = 2, fill = "white", na.rm = TRUE) +
+  geom_vline(xintercept = true_onset, linetype = "dashed") +
+  scale_colour_manual(values = categ.palette) +
+  theme(legend.position = c(.8, .8)) +
+  xlim(50, 300)
+  labs(x = "Onsets in ms", y = "Count", colour = "Penalty Multiplier")
+```
+
+
+
+### Testing extreme penalty multiplier values 
+Here penalty multiplier values from 31 to 90 were tested to see how they affect the sensitivity of PELT.
+```{r}
+
+set.seed(666)
+aath <- 0.05 # arbitrary alpha threshold
+nsim <- 1000 # simulation iterations
+nboot <- 2000 
+Nt <- 50 # number of trials
+gsp <- 1 # gamma spectral power
+outvar <- 1 # noise variance
+cond1 <- matrix(0, nrow = Nt, ncol = Nf)
+cond2 <- matrix(0, nrow = Nt, ncol = Nf)
+
+penalty_multipliers <- 31:90
+
+simres_list <- vector("list", length(penalty_multipliers))
+names(simres_list) <- paste0("simres.cp", penalty_multipliers)
+
+for (multiplier in penalty_multipliers) {
+    res <- vector(mode = "numeric", length = nsim) * NA
+    cond1 <- matrix(0, nrow = Nt, ncol = Nf)
+    cond2 <- matrix(0, nrow = Nt, ncol = Nf)
+
+    for (i in 1:nsim) {
+        for (T in 1:Nt) {
+            cond2[T, ] <- temp2 + eeg_noise(frames = Nf, srate = srate, outvar = outvar, meanpower)
+            cond1[T, ] <- temp1 + eeg_noise(frames = Nf, srate = srate, outvar = outvar, meanpower)
+        }
+
+        ori.t2 <- vector(mode = "numeric", length = Nf)
+        for (F in 1:Nf) {
+            ori.t2[F] <- t.test(cond1[, F], cond2[, F])$statistic^2
+        }
+
+        pts <- cpt.meanvar(ori.t2, method = "PELT", penalty = "Manual", pen.value = multiplier * log(length(ori.t2)))
+        if (length(pts@cpts) > 0) {
+            point <- Xf[pts@cpts[1]]
+            filtered_points <- point[point > 100 & point < 200]
+            res[i] <- if (length(filtered_points) > 0) filtered_points[1] else NA
+        } else {
+            res[i] <- NA
+        }
+    }
+    simres_list[[paste0("simres.cp", multiplier)]] <- res
+}
+
+save(simres_list, file = "./data/simres_list_penalty_comparison_extreme_values.RData")
+
+```
+
+```{r warning=FALSE, fig.height=25, fig.width=25}
+
+load(file = "./data/simres_list_penalty_comparison_extreme_values.RData")
+
+df <- tibble(
+  onsets = c(simres_list$simres.cp31,
+             simres_list$simres.cp32,
+             simres_list$simres.cp33,
+             simres_list$simres.cp34,
+             simres_list$simres.cp35,
+             simres_list$simres.cp36,
+             simres_list$simres.cp37,
+             simres_list$simres.cp38,
+             simres_list$simres.cp39,
+             simres_list$simres.cp40,
+             simres_list$simres.cp41,
+             simres_list$simres.cp42,
+             simres_list$simres.cp43,
+             simres_list$simres.cp44,
+             simres_list$simres.cp45,
+             simres_list$simres.cp46,
+             simres_list$simres.cp47,
+             simres_list$simres.cp48,
+             simres_list$simres.cp49,
+             simres_list$simres.cp50,
+             simres_list$simres.cp51,
+             simres_list$simres.cp52,
+             simres_list$simres.cp53,
+             simres_list$simres.cp54,
+             simres_list$simres.cp55,
+             simres_list$simres.cp56,
+             simres_list$simres.cp57,
+             simres_list$simres.cp58,
+             simres_list$simres.cp59,
+             simres_list$simres.cp60,
+             simres_list$simres.cp61,
+             simres_list$simres.cp62,
+             simres_list$simres.cp63,
+             simres_list$simres.cp64,
+             simres_list$simres.cp65,
+             simres_list$simres.cp66,
+             simres_list$simres.cp67,
+             simres_list$simres.cp68,
+             simres_list$simres.cp69,
+             simres_list$simres.cp70,
+             simres_list$simres.cp71,
+             simres_list$simres.cp72,
+             simres_list$simres.cp73,
+             simres_list$simres.cp74,
+             simres_list$simres.cp75,
+             simres_list$simres.cp76,
+             simres_list$simres.cp77,
+             simres_list$simres.cp78,
+             simres_list$simres.cp79,
+             simres_list$simres.cp80,
+             simres_list$simres.cp81,
+             simres_list$simres.cp82,
+             simres_list$simres.cp83,
+             simres_list$simres.cp84,
+             simres_list$simres.cp85,
+             simres_list$simres.cp86,
+             simres_list$simres.cp87,
+             simres_list$simres.cp88,
+             simres_list$simres.cp89,
+             simres_list$simres.cp90),
+  multiplier = factor(rep(31:90, each = length(simres_list$simres.cp31)))
+)
+
+# Colour palette for six categories
+categ.palette <- viridis::viridis(60)
+
+
+ggplot(data = df, aes(x = onsets, colour = multiplier)) + theme_gar +
+  geom_freqpoly(binwidth = 2, fill = "white", na.rm = TRUE) +
+  geom_vline(xintercept = true_onset, linetype = "dashed") +
+  scale_colour_manual(values = categ.palette) +
+  theme(legend.position = c(.8, .8)) +
+  xlim(0, 500) +
+  labs(x = "Onsets in ms", y = "Count", colour = "Penalty Multiplier")
+```
+
+```{r warning=FALSE, fig.height=6, fig.width=8}
+
+
+df_filter <- df |> 
+  filter(multiplier %in% c(31,35,40,45))
+
+categ.palette <- viridis::viridis(n_distinct(df_filter$multiplier))
+
+ggplot(data = df_filter, aes(x = onsets, colour = multiplier)) + theme_gar +
+  geom_freqpoly(binwidth = 2, fill = "white", na.rm = TRUE) +
+  geom_vline(xintercept = true_onset, linetype = "dashed") +
+  scale_colour_manual(values = categ.palette) +
+  theme(legend.position = c(.8, .8)) +
+  xlim(50, 300)
+  labs(x = "Onsets in ms", y = "Count", colour = "Penalty Multiplier")
+```
+
+### PELT simulation with 10000 iterations for penalty multipliers 15, 30, 35, 40, 45
+
+```{r warning=FALSE, include=FALSE}
+
+ptm <- proc.time() # Timing code chunk execution
+
+# options(mc.cores = 3)
+set.seed(666)
+aath <- 0.05 # arbitrary alpha threshold
+nsim <- 10000 # simulation iterations
+nboot <- 2000 # number of permutation samples
+simres.pelt15 <- vector(mode = "numeric", length = nsim) * NA
+simres.pelt30 <- vector(mode = "numeric", length = nsim) * NA
+simres.pelt35 <- vector(mode = "numeric", length = nsim) * NA
+simres.pelt40 <- vector(mode = "numeric", length = nsim) * NA
+simres.pelt45 <- vector(mode = "numeric", length = nsim) * NA
+simres.pelt70 <- vector(mode = "numeric", length = nsim) * NA
+
+Nt <- 50 # number of trials
+gsp <- 1 # gamma spectral power
+outvar <- 1 # noise variance
+cond1 <- matrix(0, nrow = Nt, ncol = Nf)
+cond2 <- matrix(0, nrow = Nt, ncol = Nf)
+
+for(S in 1:nsim){
+  
+  for(T in 1:Nt){
+    cond2[T,] <- temp2 + one_over_f(gamma = gsp, Nf, outvar = outvar)
+    cond1[T,] <- temp1 + one_over_f(gamma = gsp, Nf, outvar = outvar)  
+  }
+  # t-tests
+  ori.t2 <- vector(mode = "numeric", length = Nf)
+  for(F in 1:Nf){
+    ori.t2[F] <- t.test(cond1[,F], cond2[,F])$statistic^2
+  }
+  
+  # Fit PELT with a penalty multiplier of 15
+  res.pelt <- cpt.meanvar(ori.t2, method = "PELT", penalty = "Manual", pen.value = 15*log(length(ori.t2)))
+  simres.pelt15[S] <- Xf[res.pelt@cpts[1]]
+  
+  # Fit PELT with a penalty multiplier of 30
+  res.pelt <- cpt.meanvar(ori.t2, method = "PELT", penalty = "Manual", pen.value = 30*log(length(ori.t2)))
+  simres.pelt30[S] <- Xf[res.pelt@cpts[1]]
+  
+  # Fit PELT with a penalty multiplier of 30
+  res.pelt <- cpt.meanvar(ori.t2, method = "PELT", penalty = "Manual", pen.value = 35*log(length(ori.t2)))
+  simres.pelt35[S] <- Xf[res.pelt@cpts[1]]
+  
+  # Fit PELT with a penalty multiplier of 30
+  res.pelt <- cpt.meanvar(ori.t2, method = "PELT", penalty = "Manual", pen.value = 40*log(length(ori.t2)))
+  simres.pelt40[S] <- Xf[res.pelt@cpts[1]]
+  
+  # Fit PELT with a penalty multiplier of 30
+  res.pelt <- cpt.meanvar(ori.t2, method = "PELT", penalty = "Manual", pen.value = 45*log(length(ori.t2)))
+  simres.pelt45[S] <- Xf[res.pelt@cpts[1]]
+  
+  # Fit PELT with a penalty multiplier of 30
+  res.pelt <- cpt.meanvar(ori.t2, method = "PELT", penalty = "Manual", pen.value = 70*log(length(ori.t2)))
+  simres.pelt70[S] <- Xf[res.pelt@cpts[1]]
+}
+
+save(simres.pelt15, simres.pelt30, simres.pelt35, simres.pelt40, simres.pelt45, simres.pelt70,
+     file = "./data/experimental_sim_PELT_15_30_35_40_45_70.RData")
+
+proc.time()-ptm
+```
+
+```{r, warning=FALSE, fig.width=10, fig.height=6}
+load("./data/experimental_sim_PELT_15_30_35_40_45_70.RData")
+
+# Colour palette from http://www.cookbook-r.com/Graphs/Colors_(ggplot2)/
+categ.palette <- c("#000000", "#E69F00", "#009E73", "#0072B2", "#D55E00", "#CC79A7", "#F0E442")
+
+df <- tibble(onsets = c(simres.pelt15, simres.pelt30, simres.pelt35, simres.pelt40, simres.pelt45),
+             method = factor(c(rep("Change point: PELT (15)", length(simres.pelt15)),
+                               rep("Change point: PELT (30)", length(simres.pelt30)),
+                               rep("Change point: PELT (35)", length(simres.pelt35)),
+                               rep("Change point: PELT (40)", length(simres.pelt40)),
+                               rep("Change point: PELT (45)", length(simres.pelt45))
+                              )))
+
+
+ggplot(data = df, aes(x = onsets, colour = method)) + theme_gar +
+  # stat_density(geom = "line") +
+  geom_freqpoly(fill = "white", na.rm = TRUE, breaks = Xf) +
+  geom_vline(xintercept = true_onset, linetype = "dashed") +
+  # geom_vline(xintercept = median(simres.cp, na.rm = TRUE))
+  scale_colour_manual(values = categ.palette) +
+  theme(legend.position = c(.8, .8)) +
+  labs(x = "Onsets in ms", y = "Count")
+```
+
+```{r, warning=FALSE, fig.height=8, fig.width=8}
+load("./data/experimental_sim_PELT_15_30_35_40_45_70.RData")
+
+# Colour palette from http://www.cookbook-r.com/Graphs/Colors_(ggplot2)/
+categ.palette <- c("#000000", "#E69F00", "#009E73", "#0072B2", "#D55E00", "#CC79A7", "#F0E442")
+
+df <- tibble(onsets = c(simres.pelt30, simres.pelt35),
+             method = factor(c(rep("Change point: PELT (30)", length(simres.pelt30)),
+                               rep("Change point: PELT (35)", length(simres.pelt35))
+                              )))
+
+
+ggplot(data = df, aes(x = onsets, colour = method)) + theme_gar +
+  # stat_density(geom = "line") +
+  geom_freqpoly(fill = "white", na.rm = TRUE, breaks = Xf) +
+  geom_vline(xintercept = true_onset, linetype = "dashed") +
+  # geom_vline(xintercept = median(simres.cp, na.rm = TRUE))
+  scale_colour_manual(values = categ.palette) +
+  theme(legend.position = c(.8, .8)) +
+  labs(x = "Onsets in ms", y = "Count")
+```
+
+
+### PELT simulation for all multiplier values from 1-90 with no limits
+Here all penalty multiplier values from 1-90 were simulated over 1000 iterations to give a definitive multiplier value that can be used in the main simulations where PELT was compared with other methods. Ultimately, it was decided that the penalty multiplier value of 30 gives a better balance of underestimations vs extreme overestimation compared to all other values. However, looking at the plots below it could be argued that multiplier values near around 30 would provide similar results. 
+```{r}
+
+set.seed(666)
+aath <- 0.05 # arbitrary alpha threshold
+nsim <- 1000 # simulation iterations
+nboot <- 2000 
+Nt <- 50 # number of trials
+gsp <- 1 # gamma spectral power
+outvar <- 1 # noise variance
+cond1 <- matrix(0, nrow = Nt, ncol = Nf)
+cond2 <- matrix(0, nrow = Nt, ncol = Nf)
+
+penalty_multipliers <- 1:90
+
+simres_list <- vector("list", length(penalty_multipliers))
+names(simres_list) <- paste0("simres.cp", penalty_multipliers)
+
+for (multiplier in penalty_multipliers) {
+    res <- vector(mode = "numeric", length = nsim) * NA
+    cond1 <- matrix(0, nrow = Nt, ncol = Nf)
+    cond2 <- matrix(0, nrow = Nt, ncol = Nf)
+
+    for (i in 1:nsim) {
+        for (T in 1:Nt) {
+            cond2[T, ] <- temp2 + eeg_noise(frames = Nf, srate = srate, outvar = outvar, meanpower)
+            cond1[T, ] <- temp1 + eeg_noise(frames = Nf, srate = srate, outvar = outvar, meanpower)
+        }
+
+        ori.t2 <- vector(mode = "numeric", length = Nf)
+        for (F in 1:Nf) {
+            ori.t2[F] <- t.test(cond1[, F], cond2[, F])$statistic^2
+        }
+
+        pts <- cpt.meanvar(ori.t2, method = "PELT", penalty = "Manual", pen.value = multiplier * log(length(ori.t2)))
+        res[i] <- Xf[pts@cpts[1]]
+    }
+    simres_list[[paste0("simres.cp", multiplier)]] <- res
+}
+
+save(simres_list, file = "./data/simres_list_penalty_comparison_1-90_no_limits.RData")
+
+```
+
+```{r warning=FALSE, fig.height=8, fig.width=16}
+
+load(file = "./data/simres_list_penalty_comparison_1-90_no_limits.RData")
+
+onsets <- do.call(c, simres_list)
+
+multiplier <- rep(1:90, each = sapply(simres_list, length))
+
+df <- tibble(onsets = onsets, multiplier = factor(multiplier))
+
+categ.palette <- viridis::viridis(90)
+
+
+ggplot(data = df, aes(x = onsets, colour = multiplier)) + theme_gar +
+  geom_freqpoly(binwidth = 2, fill = "white", na.rm = TRUE) +
+  geom_vline(xintercept = true_onset, linetype = "dashed") +
+  scale_colour_manual(values = categ.palette) +
+  theme(legend.position = c(.8, .8)) +
+  xlim(0, 500) +
+  labs(x = "Onsets in ms", y = "Count", colour = "Penalty Multiplier")
+```
+
+```{r}
+
+# Assuming simres_list is a list of vectors
+onsets <- do.call(c, simres_list)
+
+# Create a vector of multipliers
+multiplier <- rep(1:90, each = sapply(simres_list, length))
+
+# Create the data frame
+df <- tibble(onsets = onsets, multiplier = factor(multiplier))
+
+# Define the color palette
+categ.palette <- viridis::viridis(90)
+
+# Plotting
+ggplot(data = df, aes(x = onsets, colour = multiplier)) +
+  geom_freqpoly(binwidth = 2, fill = "white", na.rm = TRUE) +
+  geom_vline(xintercept = true_onset, linetype = "dashed") +
+  scale_colour_manual(values = categ.palette) +
+  theme(legend.position = c(.8, .8)) +
+  xlim(0, 500) +
+  labs(x = "Onsets in ms", y = "Count", colour = "Penalty Multiplier")
+
+```
+
+
+```{r warning=FALSE}
+df_filter <- df |> 
+  filter(multiplier %in% c(50,60,70))
+
+categ.palette <- viridis::viridis(n_distinct(df_filter$multiplier))
+
+ggplot(data = df_filter, aes(x = onsets, colour = multiplier)) + theme(panel.background = element_rect(fill = "grey70"), panel.grid = element_line(color = "grey80")) + 
+  geom_freqpoly(binwidth = 2, fill = "white", na.rm = TRUE) +
+  geom_vline(xintercept = true_onset, linetype = "dashed") +
+  scale_colour_manual(values = categ.palette) +
+  theme(legend.position = c(.8, .8)) +
+  xlim(0, 500)
+  labs(x = "Onsets in ms", y = "Count", colour = "Penalty Multiplier")
+```
+
