@@ -64,9 +64,10 @@ prior <- list(
   cp_1 = "dunif(100, 250)" # Change point expected between 100 and 250 ms
 )
 
+# mcp model
 model <- list(
-  y ~ 1 + sigma(1),
-    ~ 0 + x + sigma(1)
+  y ~ 1 + sigma(1), # first segment of the model, y ~ 1 implies that variable y includes an intercept, sigma(1) is the specification for standard deviation of residuals
+    ~ 0 + x + sigma(1) # second segment of the model
 )
 
 Nt <- 50 # number of trials
@@ -76,6 +77,7 @@ outvar <- 1 # noise variance
 cond1 <- matrix(0, nrow = Nt, ncol = Nf)
 cond2 <- matrix(0, nrow = Nt, ncol = Nf)
 
+# Initialising empty matrixes to store results for each method
 simres.cp <- matrix(NA, nrow = Np, ncol = nsim)
 simres.fdr <- matrix(NA, nrow = Np, ncol = nsim)
 simres.cs <- matrix(NA, nrow = Np, ncol = nsim)
@@ -176,6 +178,7 @@ proc.time()-ptm
 ```
 
 ### Merging all of the files into 1
+Needed to merge the separate files storing 100 iterations 
 
 ```{r}
 # Set the directory containing the .RData files
