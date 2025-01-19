@@ -1,0 +1,137 @@
+# Dependencies
+```{r setup, message=FALSE}
+library(ggplot2)
+library(tibble)
+library(cowplot)
+library(beepr)
+library(Rfast)
+library(changepoint)
+library(mcp)
+library(rjags)
+library(mutoss)
+library(ecp)
+library(bcp)
+source("./code/functions.R")
+source("./code/theme_gar.txt")
+# Edit `one_over_f` function from `primer` package to control variance (Stevens, 2009). 
+# Original function is available on [GitHub](https://github.com/HankStevens/primer).
+# Copyright Hank Stevens.
+source("./code/one_over_f.R")
+# Load template: true onset = 160 ms, F=81, max at F=126
+source("./code/erp_template.R")
+# R version of Matlab code from Yeung et al. 2004
+source("./code/eeg_noise.R")
+# Lodaing the code that gives median instead of mean values in mcp summary table
+source("./code/mcp_median_function.R")
+# to use with eeg_noise function
+meanpower <- unlist(read.table("./code/meanpower.txt"))
+```
+
+## single participant sim
+```{r eval=FALSE, warning=FALSE, include=FALSE}
+ptm <- proc.time() # Timing code chunk execution
+set.seed(666)
+aath <- 0.05 # arbitrary alpha threshold
+nsim <- 10000 # simulation iterations
+nboot <- 2000 # number of permutation samples
+simres.bcp  <- vector(mode = "numeric", length = nsim) * NA
+
+Nt <- 50 # number of trials
+gsp <- 1 # gamma spectral power
+outvar <- 1 # noise variance
+cond1 <- matrix(0, nrow = Nt, ncol = Nf)
+cond2 <- matrix(0, nrow = Nt, ncol = Nf)
+
+for(S in 1:nsim){
+  
+  for(T in 1:Nt){
+    cond2[T,] <- temp2 + one_over_f(gamma = gsp, Nf, outvar = outvar)
+    cond1[T,] <- temp1 + one_over_f(gamma = gsp, Nf, outvar = outvar)  
+  }
+  # t-tests
+  ori.t2 <- vector(mode = "numeric", length = Nf)
+  for(F in 1:Nf){
+    ori.t2[F] <- t.test(cond1[,F], cond2[,F])$statistic^2
+  }
+  
+  df <- tibble(x = Xf,
+               y = ori.t2)
+  
+  # fit bcp
+  res <- bcp(df$y, p0 = 0.1, mcmc = 3000)
+  simres.bcp[S] <- Xf[which.max(res$posterior.prob)]
+}
+
+save(simres.bcp,
+  file = "./data/single_participant_bcp.RData")
+
+proc.time()-ptm
+```
+
+## vary n sim
+```{r eval=FALSE, message=TRUE, warning=FALSE, include=FALSE}
+
+# Saving function to save simulation results incrementally every 100 simulation iterations
+
+
+set.seed(666) 
+aath <- 0.05 # arbitrary alpha threshold
+nsim <- 10000 # simulation iterations
+nboot <- 2 # number of permutation samples
+srate <- 500 # sampling rate in Hz
+n_vec <- seq(20,150,10) 
+n_length <- length(n_vec)
+n_max <- max(n_vec)
+inc.step <- 500
+
+# Matrices for each method
+simres.bcp <- matrix(NA, nrow = n_length, ncol = nsim)
+
+outvar <- 1 # noise variance
+cond1_all <- matrix(0, nrow = n_max, ncol = Nf)
+cond2_all <- matrix(0, nrow = n_max, ncol = Nf)
+
+for(S in 1:nsim){
+  
+  sim.counter(S, nsim, inc = inc.step)
+  
+  # Generate all trials
+  for(T in 1:n_max){
+    cond2_all[T,] <- temp2 + eeg_noise(frames = Nf, srate = srate, outvar = outvar, meanpower)
+    cond1_all[T,] <- temp1 + eeg_noise(frames = Nf, srate = srate, outvar = outvar, meanpower) 
+  }
+  
+  for(N in 1:n_length){
+    
+    Nt <- n_vec[N]
+    
+    # downsample to current size
+    cond2 <- cond2_all[1:Nt,]
+    cond1 <- cond1_all[1:Nt,]
+    
+    # t-tests
+    ori.t2 <- vector(mode = "numeric", length = Nf)
+    for(F in 1:Nf){
+      ori.t2[F] <- t.test(cond1[,F], cond2[,F])$statistic^2
+    }
+    
+    df <- tibble(x = Xf,
+               y = ori.t2)
+    
+    #######################################
+    
+    # fit bcp
+    res <- bcp(df$y, p0 = 0.1, mcmc = 3000)
+    simres.bcp[N,S] <- Xf[which.max(res$posterior.prob)]
+  }
+  
+  if (S %% 100 == 0) {
+    temp.simres1 <- simres.bcp[, 1:S]
+    save(temp.simres1, file = paste0("./vary_n_bcp_data/vary_n_bcp", S, ".RData"))
+  }
+}
+
+save(simres.bcp, file = "./data/vary_n_bcp.RData")
+```
+
+## group sim

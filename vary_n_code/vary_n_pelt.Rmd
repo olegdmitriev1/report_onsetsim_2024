@@ -1,0 +1,99 @@
+---
+output:
+  pdf_document:
+    fig_caption: no
+    number_sections: no
+    toc: yes
+    toc_depth: 2
+    # github_document:
+    # html_preview: yes
+    # toc: yes
+    # toc_depth: 2
+editor_options: 
+  chunk_output_type: inline
+---
+
+# Dependencies
+```{r setup, message=FALSE}
+library(ggplot2)
+library(tibble)
+library(cowplot)
+library(beepr)
+library(Rfast)
+library(changepoint)
+library(mcp)
+library(rjags)
+library(mutoss)
+library(ecp)
+source("./code/functions.R")
+source("./code/theme_gar.txt")
+# Edit `one_over_f` function from `primer` package to control variance (Stevens, 2009). 
+# Original function is available on [GitHub](https://github.com/HankStevens/primer).
+# Copyright Hank Stevens.
+source("./code/one_over_f.R")
+# Load template: true onset = 160 ms, F=81, max at F=126
+source("./code/erp_template.R")
+# R version of Matlab code from Yeung et al. 2004
+source("./code/eeg_noise.R")
+# Lodaing the code that gives median instead of mean values in mcp summary table
+source("./code/mcp_median_function.R")
+# to use with eeg_noise function
+meanpower <- unlist(read.table("./code/meanpower.txt"))
+```
+
+# Simulation: vary sample size
+
+```{r eval=FALSE, message=TRUE, warning=FALSE, include=FALSE}
+set.seed(666) 
+aath <- 0.05 # arbitrary alpha threshold
+nsim <- 10000 # simulation iterations
+nboot <- 2 # number of permutation samples
+srate <- 500 # sampling rate in Hz
+n_vec <- seq(20,150,10) 
+n_length <- length(n_vec)
+n_max <- max(n_vec)
+inc.step <- 500
+
+# Matrices for each method
+simres.pelt <- matrix(NA, nrow = n_length, ncol = nsim)
+
+outvar <- 1 # noise variance
+cond1_all <- matrix(0, nrow = n_max, ncol = Nf)
+cond2_all <- matrix(0, nrow = n_max, ncol = Nf)
+
+for(S in 1:nsim){
+  
+  sim.counter(S, nsim, inc = inc.step)
+  
+  # Generate all trials
+  for(T in 1:n_max){
+    cond2_all[T,] <- temp2 + eeg_noise(frames = Nf, srate = srate, outvar = outvar, meanpower)
+    cond1_all[T,] <- temp1 + eeg_noise(frames = Nf, srate = srate, outvar = outvar, meanpower) 
+  }
+  
+  for(N in 1:n_length){
+    
+    Nt <- n_vec[N]
+    
+    # downsample to current size
+    cond2 <- cond2_all[1:Nt,]
+    cond1 <- cond1_all[1:Nt,]
+    
+    # t-tests
+    ori.t2 <- vector(mode = "numeric", length = Nf)
+    for(F in 1:Nf){
+      ori.t2[F] <- t.test(cond1[,F], cond2[,F])$statistic^2
+    }
+    
+    #######################################
+    
+    # Fit PELT with a penalty multiplier of 30
+    res.pelt <- cpt.meanvar(ori.t2, method = "PELT", penalty = "Manual", pen.value = 30*log(length(ori.t2)))
+    simres.pelt[N,S] <- Xf[res.pelt@cpts[1]]
+  
+    ######################################
+  }
+}
+
+save(simres.pelt, file = "./data/vary_n_pelt.RData")
+```
