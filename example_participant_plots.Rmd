@@ -1,0 +1,295 @@
+---
+output:
+  pdf_document:
+    fig_caption: no
+    number_sections: no
+    toc: yes
+    toc_depth: 2
+    # github_document:
+    # html_preview: yes
+    # toc: yes
+    # toc_depth: 2
+editor_options: 
+  chunk_output_type: inline
+---
+
+Code for these plots taken from Rousselet (2023).
+
+# Dependencies
+```{r setup, message=FALSE}
+library(ggplot2)
+library(tibble)
+library(cowplot)
+library(beepr)
+library(Rfast)
+library(changepoint)
+library(mcp)
+library(rjags)
+library(mutoss)
+library(ecp)
+library(bcp)
+source("./code/functions.R")
+source("./code/theme_gar.txt")
+# Edit `one_over_f` function from `primer` package to control variance (Stevens, 2009). 
+# Original function is available on [GitHub](https://github.com/HankStevens/primer).
+# Copyright Hank Stevens.
+source("./code/one_over_f.R")
+# Load template: true onset = 160 ms, F=81, max at F=126
+source("./code/erp_template.R")
+# R version of Matlab code from Yeung et al. 2004
+source("./code/eeg_noise.R")
+# Lodaing the code that gives median instead of mean values in mcp summary table
+source("./code/mcp_median_function.R")
+# to use with eeg_noise function
+meanpower <- unlist(read.table("./code/meanpower.txt"))
+```
+
+
+# T^2 time courses
+
+```{r}
+# t-tests
+ori.t2 <- vector(mode = "numeric", length = Nf)
+for(F in 1:Nf){
+  ori.t2[F] <- t.test(cond1[,F], cond2[,F])$statistic^2
+}
+
+df <- tibble(x = Xf,
+             y = ori.t2)
+p <- ggplot(df, aes(x, y)) + theme_gar +
+  geom_line(linewidth = 1) +
+  geom_vline(xintercept = true_onset) +
+    labs(x = "Time in ms", y = bquote(t^2))
+p
+p.t2 <- p
+ggsave(filename = "./figures/eeg_t2.pdf", width = 10, height = 5)
+```
+
+## Permutation
+
+### Generate distribution
+```{r}
+nboot <- 500
+aath <- 0.05 # arbitrary alpha threshold
+# Make permutation table of t values 
+perm.tvals <- permtdist(cond1, cond2, Nt, Nf, nboot = nboot)
+perm.t2 <- perm.tvals^2
+```
+
+### Compute onsets
+```{r}
+perm.th <- apply(perm.t2, 2, quantile, probs = 1-aath) 
+
+# FDR -----
+perm.pvals <- vector(mode = "numeric", length = Nf)
+for(F in 1:Nf){
+  perm.pvals[F] <- (sum(perm.t2[,F] >= ori.t2[F]) + 1) / (nboot + 1)
+}
+# fdr.pvals <- p.adjust(ori.pvals, method = "fdr")
+fdr.pvals <- p.adjust(perm.pvals, method = "fdr")
+# onset.fdr <- Xf[which(fdr.pvals <= aath)[1]]
+onset.fdr <- find_onset(fdr.pvals <= aath, Xf)
+
+# MAX -----
+max.th <- quantile(apply(perm.t2, 1, max), probs = 1-aath)
+# onset.max <- Xf[which(ori.t2 >= max.th)[1]]
+onset.max <- find_onset(ori.t2 >= max.th, Xf)
+
+# cluster-sum statistics -----
+cmap <- cluster.make(perm.pvals <= aath)
+perm.max.sums <- vector(mode = "numeric", length = nboot)
+for(B in 1:nboot){
+  # threshold permutation t2 values and form clusters
+  perm.cmap <- cluster.make(perm.t2[B,] <= perm.th)  
+  perm.max.sums[B] <- max(cluster.sum(values = perm.t2[B,], cmap = perm.cmap))
+}
+# cluster sum threshold
+cs.th <- quantile(perm.max.sums, probs = 1-aath)
+# cluster test
+cs.test <- cluster.test(values = perm.t2, cmap = cmap, cs.th)
+# onset.cs <- Xf[cs.test][1]
+onset.cs <- find_onset(cs.test, Xf)
+```
+
+### Plot permutation distribution + FDR onset
+
+Superimpose original t^2 time course and 95th quantiles of permutation distribution.
+
+```{r, warning=FALSE}
+df <- tibble(x = Xf,
+             y = ori.t2,
+             boot = factor(rep(1, Nf)))
+
+df.perm <- tibble(x = rep(Xf, each = nboot),
+                  y = as.vector(perm.t2),
+                  boot = factor(rep(1:nboot, Nf)))
+
+df.q <- tibble(x = Xf, 
+               y = perm.th,
+               boot = factor(rep(1, Nf)))
+
+df.sig <- tibble(x = Xf,
+                 y = ifelse(fdr.pvals <= aath, 0, NA),
+                 boot = factor(rep(1, Nf)))
+
+p.fdr <- ggplot(data = df.perm, aes(x=x, y=y, group = boot)) + theme_gar +
+  # plot permutation distributions
+  geom_line(data = df.perm, aes(x=x, y=y, group = boot),
+            colour = "grey",
+            linewidth = 0.5) +
+  # superimpose original t2 time course
+  geom_line(data = df, linewidth = 1) +
+  geom_vline(xintercept = true_onset) + 
+  geom_line(data = df.q, linetype = "dashed") +
+  # plot onset
+  geom_vline(xintercept = onset.fdr, linetype = "dotted") +
+  # plot statistical significance
+  geom_point(data = df.sig, colour = "black") +
+  labs(x = "Time in ms", y = bquote(t^2)) +
+  ggtitle(paste("Permutation + FDR correction =",onset.fdr,"ms"))
+p.fdr
+```
+
+### cluster-sum statistics
+```{r, warning=FALSE}
+df <- tibble(x = Xf,
+             y = ori.t2,
+             boot = factor(rep(1, Nf)))
+
+df.perm <- tibble(x = rep(Xf, each = nboot),
+                  y = as.vector(perm.t2),
+                  boot = factor(rep(1:nboot, Nf)))
+
+df.q <- tibble(x = Xf, 
+               y = perm.th,
+               boot = factor(rep(1, Nf)))
+
+df.sig <- tibble(x = Xf,
+                 y = ifelse(cs.test, 0, NA),
+                 boot = factor(rep(1, Nf)))
+
+p.cs <- ggplot(data = df.perm, aes(x=x, y=y, group = boot)) + theme_gar +
+  # plot permutation distributions
+  geom_line(data = df.perm, aes(x=x, y=y, group = boot),
+            colour = "grey",
+            linewidth = 0.5) +
+  # superimpose original t2 time course
+  geom_line(data = df, linewidth = 1) +
+  geom_vline(xintercept = true_onset) + 
+  geom_line(data = df.q, linetype = "dashed") +
+  # plot onset
+  geom_vline(xintercept = onset.cs, linetype = "dotted") +
+  # plot statistical significance
+  geom_point(data = df.sig, colour = "black") +
+  labs(x = "Time in ms", y = bquote(t^2)) +
+  ggtitle(paste("Permutation + cluster-sum correction =",onset.cs,"ms"))
+p.cs
+```
+
+## `changepoint` package
+```{r, warning=FALSE}
+res <- cpt.meanvar(ori.t2, method = "BinSeg", Q=2)
+
+df <- tibble(x = Xf,
+             y = ori.t2)
+
+p.cp <- ggplot(df, aes(x, y)) + theme_gar + 
+  geom_line(linewidth = 1) +
+  geom_vline(xintercept = true_onset) +
+  geom_vline(xintercept = Xf[res@cpts[1]], linetype = "dotted") +
+  labs(x = "Time in ms", y = bquote(t^2)) +
+  ggtitle(paste("Change point onset (BinSeg) =", Xf[res@cpts[1]], "ms"))
+p.cp
+```
+
+## PELT
+```{r, warning=FALSE}
+res <- cpt.meanvar(ori.t2, method = "PELT", penalty = "Manual", pen.value = 30*log(length(ori.t2)))
+
+df <- tibble(x = Xf,
+             y = ori.t2)
+
+p.pelt <- ggplot(df, aes(x, y)) + theme_gar + 
+  geom_line(linewidth = 1) +
+  geom_vline(xintercept = true_onset) +
+  geom_vline(xintercept = Xf[res@cpts[1]], linetype = "dotted") +
+  labs(x = "Time in ms", y = bquote(t^2)) +
+  ggtitle(paste("Change point onset (PELT) =", Xf[res@cpts[1]], "ms"))
+p.pelt
+```
+
+## mcp
+
+```{r}
+set.seed(666)
+options(mc.cores = 3)
+
+prior <- list(
+  cp_1 = "dunif(100, 250)" # Change point expected between 100 and 250 ms
+)
+
+model <- list(
+  y ~ 1 + sigma(1),
+    ~ 0 + x + sigma(1)
+)
+
+df <- tibble(x = Xf,
+             y = ori.t2)
+
+fit <- mcp(model, prior = prior, data = df, cores = 3, chains = 3)
+  
+summary.fit.median <- summary.mcpfit.median(fit)
+res <- round(summary.fit.median[1,2],0)
+
+p.mcp <- ggplot(df, aes(x, y)) + theme_gar + 
+  geom_line(linewidth = 1) +
+  geom_vline(xintercept = true_onset) +
+  geom_vline(xintercept = res, linetype = "dotted") +
+  labs(x = "Time in ms", y = bquote(t^2)) +
+  ggtitle(paste("Change point onset (mcp) =", res, "ms"))
+p.mcp
+```
+
+## ecp - cp3o_delta
+
+```{r}
+ori.t2 <- matrix(ori.t2, ncol = 1)
+
+result_cp3o_delta <- e.cp3o_delta(Z = ori.t2, K = 8, alpha = 1)
+res <- get_earliest_cp(result_cp3o_delta$estimates, Xf)
+
+p.cp3o <- ggplot(df, aes(x, y)) + theme_gar + 
+  geom_line(linewidth = 1) +
+  geom_vline(xintercept = true_onset) +
+  geom_vline(xintercept = res, linetype = "dotted") +
+  labs(x = "Time in ms", y = bquote(t^2)) +
+  ggtitle(paste("Change point onset (cp3o) =", res, "ms"))
+p.cp3o
+```
+
+## bcp
+```{r}
+bcp.cp <- bcp(df$y, p0 = 0.1, mcmc = 3000)
+res <- Xf[which.max(bcp.cp$posterior.prob)]
+
+p.bcp <- ggplot(df, aes(x, y)) + theme_gar + 
+  geom_line(linewidth = 1) +
+  geom_vline(xintercept = true_onset) +
+  geom_vline(xintercept = res, linetype = "dotted") +
+  labs(x = "Time in ms", y = bquote(t^2)) +
+  ggtitle(paste("Change point onset (bcp) =", res, "ms"))
+p.bcp
+```
+
+## Plotting FDR, cluster-sum, BinSeg, PELT, mcp and cp3o_delta plots together
+
+```{r, warning = FALSE, fig.height=14, fig.width=14}
+cowplot::plot_grid(p.cs, p.fdr, p.cp, p.pelt, p.cp3o, p.bcp, p.mcp,
+                   nrow = 4,
+                   labels = c("A", "B", "C", "D", "E", "F", "G"),
+                   label_size = 20)
+
+ggsave(filename = "./figures/single.part.examples.pdf", width = 15, height = 14)
+```
+
+Rousselet GA (2023) Using cluster-based permutation tests to estimate MEG/EEG onsets: how bad is it? bioRxiv. https://doi.org/10.1101/2023.11.13.566864
