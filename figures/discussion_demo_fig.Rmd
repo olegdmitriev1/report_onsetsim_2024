@@ -1,0 +1,287 @@
+```{r setup, message=FALSE}
+library(ggplot2)
+library(tidyverse)
+library(tibble)
+library(cowplot)
+library(Rfast)
+library(mcp)
+library(rjags)
+library(mutoss)
+library(dplyr)
+source("./code/functions.R")
+source("./code/theme_gar.txt")
+# Edit `one_over_f` function from `primer` package to control variance (Stevens, 2009). 
+# Original function is available on [GitHub](https://github.com/HankStevens/primer).
+# Copyright Hank Stevens.
+source("./code/one_over_f.R")
+# Load template: true onset = 160 ms, F=81, max at F=126
+source("./code/erp_template.R")
+# R version of Matlab code from Yeung et al. 2004
+source("./code/eeg_noise.R")
+# Lodaing the code that gives median instead of mean values in mcp summary table
+source("./code/mcp_median_function.R")
+# to use with eeg_noise function
+meanpower <- unlist(read.table("./code/meanpower.txt"))
+```
+
+### Computation
+```{r eval=FALSE}
+options(mc.cores = 3)
+set.seed(777)
+load("./data/df_s1.RData")
+load("./data/df_s2.RData")
+
+prior <- list(
+  cp_1_participant = "dunif(50,150)",
+  # cp_1_participant = "dunif(50, 200) T(50, )",
+  int_1 = "dt(0, 1/(3*10)^2, 3)",
+  x_2 = "dt(0, 1/(10/(200-50))^2, 3)",
+  sigma_1 = "dnorm(0, 1/(10)^2) T(0, )"
+)
+
+model <- list(
+  y ~ 1 + sigma(1),
+  1 + (1|participant) ~ 0 + x + sigma(1)
+)
+
+# Here I sample a selection of participants that will be used for the demo
+# sample(1:75,30) # Randomly sampling 30 participants and pikcing appropriate time courses for demo 
+p.nums <- data.frame(participant = c(22,30,1,48,26,43,6,41,11,18,32,55,36,53,28,3,19,37,20,62,65,17,67,35,54,34,72,5,70,46))
+
+cps.s1 <- df.s1 |> filter(participant %in% p.nums$participant, x >= 0)
+cps.s2 <- df.s2 |> filter(participant %in% p.nums$participant, x >= 0)
+
+s1.fixed.fit <- mcp(model = model, data = cps.s1, prior = prior, cores = 3, chains = 3)
+# save(s1.fixed.fit, file = "./data/s1_fixed_fit.RData") # running the model above on all 75 participants (not 30)
+save(s1.fixed.fit, file = "./data/s1_fixed_fit_30p.RData")
+
+s2.fixed.fit <- mcp(model = model, data = cps.s2, prior = prior, cores = 3, chains = 3)
+# save(s2.fixed.fit, file = "./data/s2_fixed_fit.RData")
+save(s2.fixed.fit, file = "./data/s2_fixed_fit_30p.RData")
+```
+
+## Results
+```{r fig.height=10, fig.width=14}
+load("./data/s1_fixed_fit_30p.RData") # varying change points model, fixed priors, session 1
+load("./data/s2_fixed_fit_30p.RData") # varying change points model, fixed priors, session 2
+load("./data/ind_cps_s1.RData") # independent change points model, fixed priors, session 1
+load("./data/ind_cps_s2.RData") # independent change points model, fixed priors, session 2
+
+# Processing data: Session 1 hierarchical
+fit.med <- round(summary.mcpfit.median(s1.fixed.fit)[1,2],0)
+ranef.s1 <- ranef.med(s1.fixed.fit)
+ranef.s1 <- subset(ranef.s1, select = -c(lower, upper, Rhat, n.eff))
+ranef.s1$participant <- as.numeric(gsub("cp_1_participant\\[|\\]", "", ranef.s1$name))
+ranef.s1$name <- NULL
+ranef.s1$cp.h.s1 <- round((ranef.s1$median + fit.med),0)
+ranef.s1$median <- NULL
+
+# Session 2 hierarchical
+fit.med <- round(summary.mcpfit.median(s2.fixed.fit)[1,2],0)
+ranef.s2 <- ranef.med(s2.fixed.fit)
+ranef.s2 <- subset(ranef.s2, select = -c(lower, upper, Rhat, n.eff))
+ranef.s2$participant <- as.numeric(gsub("cp_1_participant\\[|\\]", "", ranef.s2$name))
+ranef.s2$name <- NULL
+ranef.s2$cp.h.s2 <- round((ranef.s2$median + fit.med),0)
+ranef.s2$median <- NULL
+
+cps <- left_join(ranef.s1, ranef.s2, by = "participant") |> 
+  left_join(ind.cps.s1, by = "participant") |> 
+  rename(cp.i.s1 = change.point.i) |> 
+  left_join(ind.cps.s2, by = "participant") |> 
+  rename(cp.i.s2 = change.point.i)
+
+# cps <- cps[cps$participant %in% p.nums$participant,]
+
+#############
+# Combined
+s1.h.med <- median(cps$cp.h.s1) # Calculating medians for intercept lines
+s2.h.med <- median(cps$cp.h.s2)
+s1.i.med <- median(cps$cp.i.s1)
+s2.i.med <- median(cps$cp.i.s2)
+
+var.h.s1 <- var(cps$cp.h.s1) # Calculating variance 
+var.h.s2 <- var(cps$cp.h.s2)
+var.i.s1 <- var(cps$cp.i.s1)
+var.i.s2 <- var(cps$cp.i.s2)
+
+i.cps <- c(cps$cp.i.s1, cps$cp.i.s2) # Calculating variance of the hierarchical and independent samples across both sessions
+h.cps <- c(cps$cp.h.s1, cps$cp.h.s2)
+var.i <- var(i.cps)
+var.h <- var(h.cps)
+
+cps.long.s1 <- cps |> 
+  select(participant, cp.i.s1, cp.h.s1) |> 
+  pivot_longer(cols = c(cp.i.s1, cp.h.s1), 
+               names_to = "variable", 
+               values_to = "value")
+
+cps.long.s2 <- cps |> 
+  select(participant, cp.i.s2, cp.h.s2) |> 
+  pivot_longer(cols = c(cp.i.s2, cp.h.s2), 
+               names_to = "variable", 
+               values_to = "value")
+
+cps.long <- bind_rows(
+  cps |> 
+    select(participant, s1 = cp.i.s1, s2 = cp.i.s2) |> 
+    mutate(Pooled = "No"),
+  
+  cps |> 
+    select(participant, s1 = cp.h.s1, s2 = cp.h.s2) |> 
+    mutate(Pooled = "Yes")
+) |> mutate(participant = as.factor(participant))
+
+comb.plot <- cps.long |> 
+  ggplot(aes(x = s1, y = s2)) +
+  geom_abline(intercept = 0, slope = 1, linetype = 2, color = "black", size = 1) +
+  stat_ellipse(geom = "polygon", type = "norm", level = 1/10, size = 0, alpha = 1/10, fill = "gray") +
+  stat_ellipse(geom = "polygon", type = "norm", level = 2/10, size = 0, alpha = 1/10, fill = "gray") +
+  stat_ellipse(geom = "polygon", type = "norm", level = 3/10, size = 0, alpha = 1/10, fill = "gray") +
+  stat_ellipse(geom = "polygon", type = "norm", level = 4/10, size = 0, alpha = 1/10, fill = "gray") +
+  stat_ellipse(geom = "polygon", type = "norm", level = 5/10, size = 0, alpha = 1/10, fill = "gray") +
+  stat_ellipse(geom = "polygon", type = "norm", level = 6/10, size = 0, alpha = 1/10, fill = "gray") +
+  stat_ellipse(geom = "polygon", type = "norm", level = 7/10, size = 0, alpha = 1/10, fill = "gray") +
+  stat_ellipse(geom = "polygon", type = "norm", level = 8/10, size = 0, alpha = 1/10, fill = "gray") +
+  stat_ellipse(geom = "polygon", type = "norm", level = 9/10, size = 0, alpha = 1/10, fill = "gray") +
+  stat_ellipse(geom = "polygon", type = "norm", level = 0.99, size = 0, alpha = 1/10, fill = "gray") +
+  geom_line(aes(group = participant), size = 1/4) +
+  geom_point(aes(group = participant, color = Pooled)) +
+  scale_color_manual(values = c("#990000", "#E69F00"), 
+                     labels = c("Independent", "Hierarchical"),
+                     name = NULL) +
+  theme_minimal(base_size = 16) +
+  xlim(0, 200) + ylim(0, 200) +
+  theme_gar +
+  coord_fixed(ratio = 1) +
+  labs(x = "Session 1 onsets (ms)", y = "Session 2 onsets (ms)") +
+  geom_segment(aes(x = s1.h.med, xend = s1.h.med, 
+                   y = 0, yend = s2.h.med), color = "#E69F00", size = 0.7) +  
+  geom_segment(aes(x = 0, xend = s1.h.med, 
+                   y = s2.h.med, yend = s2.h.med), color = "#E69F00", size = 0.7) +  
+  geom_segment(aes(x = s1.i.med, xend = s1.i.med, 
+                   y = 0, yend = s2.i.med), color = "#990000", size = 0.7) +  
+  geom_segment(aes(x = 0, xend = s1.i.med, 
+                   y = s2.i.med, yend = s2.i.med), color = "#990000", size = 0.7) +
+  theme(
+    legend.position = c(0.3, 0.9),
+    legend.background = element_rect(fill = "white", color = "black"),
+    legend.key = element_rect(fill = "white")
+  )
+
+cps.long <- bind_rows(
+  cps.long.s1 |> mutate(Session = "Session 1"),
+  cps.long.s2 |> mutate(Session = "Session 2")
+)
+
+# Set the order of the y-axis labels
+cps.long$variable <- factor(cps.long$variable, levels = rev(c(
+  "cp.i.s1",  # Independent (Session 1) - TOP
+  "cp.h.s1",  # Hierarchical (Session 1)
+  "cp.i.s2",  # Independent (Session 2)
+  "cp.h.s2"   # Hierarchical (Session 2) - BOTTOM
+)))
+
+box.plot <- ggplot(cps.long, aes(x = value, y = variable)) +
+  geom_boxplot(aes(fill = Session), outlier.shape = NA, width = 0.5) +  
+  geom_point(aes(color = Session), size = 2, alpha = 0.7) +  
+  geom_line(aes(group = interaction(participant, Session), color = Session), size = 0.5, alpha = 0.5) + 
+  labs(x = "Time (ms)", y = "") +
+  scale_y_discrete(labels = c(
+    "cp.i.s1" = "Independent (Session 1)", 
+    "cp.h.s1" = "Hierarchical (Session 1)",
+    "cp.i.s2" = "Independent (Session 2)", 
+    "cp.h.s2" = "Hierarchical (Session 2)"
+  )) +
+  scale_fill_manual(values = c("Session 1" = "#E69F00", "Session 2" = "#D55E00")) +
+  scale_color_manual(values = c("Session 1" = "black", "Session 2" = "black")) +
+  guides(fill = "none", color = "none") +  # Disable legends explicitly
+  theme(legend.position = "none") + 
+  theme_gar
+
+#############
+# Session 1
+# Displaying individual time courses for each participant 
+df.s1.filt <- df.s1[df.s1$participant %in% p.nums$participant,]
+df.wide <- df.s1.filt |> 
+  pivot_wider(names_from = participant, values_from = y, names_prefix = "participant_")
+
+df.wide <- df.wide %>%
+  mutate(mean.y = rowMeans(select(., starts_with("participant_"))))
+
+s1.plot <- ggplot(df.s1.filt, aes(x = x, y = y, group = participant)) +  # Group lines by participant
+  theme_gar + 
+  geom_line(color = "grey", linewidth = 0.5, alpha = 0.5) +  # Thin, transparent grey lines
+  geom_vline(xintercept = median(cps$cp.i.s1), linetype = "solid", color = "#990000", linewidth = .7) +  # Vertical line for median change.point
+  geom_vline(xintercept = median(cps$cp.h.s1), linetype = "solid", color = "#E69F00", linewidth = .7) +  # Vertical line for median change.point.h
+  labs(x = "Time in ms", y = bquote(t^2)) +
+  geom_line(data = df.wide, aes(x = x, y = mean.y), inherit.aes = F, color = "black", linewidth = 1.5) +
+  geom_vline(xintercept = 50, linetype = "dashed", colour = "black", linewidth = .6) +
+  geom_vline(xintercept = 150, linetype = "dashed", colour = "black", linewidth = .6) +
+  ylim(0,800) + xlim(-50,600) +
+  annotate(
+    "text", 
+    x = 280, 
+    y = 700,  
+    label = paste("Session 1 Median Onset\nIndependent =", round(median(cps$cp.i.s1),0), 
+                  "ms\nHierarchical =", round(median(cps$cp.h.s1),0), "ms"),
+    color = "black", 
+    size = 5, 
+    hjust = 0
+  ) +
+  annotate(
+    "rect", 
+    xmin = 270, xmax = 620,
+    ymin = 580, ymax = 800,
+    fill = "white", 
+    alpha = 0.3, 
+    color = "black"
+  )
+
+#############
+# Session 2
+df.s2.filt <- df.s2[df.s1$participant %in% p.nums$participant,]
+df.wide <- df.s2.filt |> 
+  pivot_wider(names_from = participant, values_from = y, names_prefix = "participant_")
+
+df.wide <- df.wide %>%
+  mutate(mean.y = rowMeans(select(., starts_with("participant_"))))
+
+s2.plot <- ggplot(df.s2.filt, aes(x = x, y = y, group = participant)) +  # Group lines by participant
+  theme_gar + 
+  geom_line(color = "grey", linewidth = 0.5, alpha = 0.5) +  # Thin, transparent grey lines
+  geom_vline(xintercept = median(cps$cp.i.s2), linetype = "solid", color = "#990000", linewidth = .7) +  # Vertical line for median change.point
+  geom_vline(xintercept = median(cps$cp.h.s2), linetype = "solid", color = "#E69F00", linewidth = .7) +  # Vertical line for median change.point.h
+  labs(x = "Time in ms", y = bquote(t^2)) +
+  geom_line(data = df.wide, aes(x = x, y = mean.y), inherit.aes = F, color = "black", linewidth = 1.5) +
+  geom_vline(xintercept = 50, linetype = "dashed", colour = "black", linewidth = .6) +
+  geom_vline(xintercept = 150, linetype = "dashed", colour = "black", linewidth = .6)+
+  ylim(0,800) + xlim(-50,600) +
+  annotate(
+    "text", 
+    x = 280, 
+    y = 700,  
+    label = paste("Session 2 Median Onset\nIndependent =", round(median(cps$cp.i.s2),0), 
+                  "ms\nHierarchical =", round(median(cps$cp.h.s2),0), "ms"),
+    color = "black", 
+    size = 5, 
+    hjust = 0
+  ) +
+  annotate(
+    "rect", 
+    xmin = 270, xmax = 620,
+    ymin = 580, ymax = 800,
+    fill = "white", 
+    alpha = 0.3, 
+    color = "black"
+)
+
+############
+
+big.plot <- plot_grid(s1.plot, s2.plot, box.plot, comb.plot,
+                   nrow = 2,
+                   labels = c("A", "B", "C", "D"),
+                   label_size = 20)
+big.plot
+ggsave(filename = "./figures/discussion_plot.pdf", height = 10, width = 15)
+```
